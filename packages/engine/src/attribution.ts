@@ -1,4 +1,5 @@
 import { EffectError } from './errors';
+import { PHASES } from './events';
 import type { Event, LogEntry, Phase } from './events';
 import { buildHistory } from './history';
 import type { ProjectState } from './history';
@@ -107,9 +108,7 @@ export const counterfactualStrategy: AttributionStrategy = {
 // Categories: how events are grouped into the contributors the retrospective shows (spec §4, §24).
 // ---------------------------------------------------------------------------------------------------------------
 
-export const PHASE_ORDER: readonly Phase[] = [
-  'PLANNING', 'STORYBOARD', 'ART', 'DEVELOPMENT', 'INTERNAL_REVIEW', 'ALPHA', 'CLIENT_REVIEW', 'QA', 'BETA', 'POST_DELIVERY',
-];
+export const PHASE_ORDER: readonly Phase[] = PHASES;
 
 const atOrAfter = (phase: Phase, from: Phase): boolean => PHASE_ORDER.indexOf(phase) >= PHASE_ORDER.indexOf(from);
 

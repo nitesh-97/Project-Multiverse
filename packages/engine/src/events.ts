@@ -2,33 +2,38 @@ import type { ISODate, ModuleId, Task, TaskId, TeamId, WorkDays } from './types'
 
 export type PersonId = string;
 
-export type EventType =
-  | 'FEEDBACK'
-  | 'SCOPE_CHANGE'
-  | 'REQUIREMENT_CHANGE'
-  | 'BLOCKER'
-  | 'DEPENDENCY_DELAY'
-  | 'RESOURCE_CHANGE'
-  | 'REWORK'
-  | 'DEFECT'
-  | 'TECHNICAL_DECISION'
-  | 'OWNERSHIP_TRANSFER'
-  | 'CLIENT_FEEDBACK'
-  | 'TASK_DELAY'
-  | 'TASK_COMPLETION'
-  | 'MILESTONE_CHANGE';
+export const EVENT_TYPES = [
+  'FEEDBACK',
+  'SCOPE_CHANGE',
+  'REQUIREMENT_CHANGE',
+  'BLOCKER',
+  'DEPENDENCY_DELAY',
+  'RESOURCE_CHANGE',
+  'REWORK',
+  'DEFECT',
+  'TECHNICAL_DECISION',
+  'OWNERSHIP_TRANSFER',
+  'CLIENT_FEEDBACK',
+  'TASK_DELAY',
+  'TASK_COMPLETION',
+  'MILESTONE_CHANGE',
+] as const;
+export type EventType = (typeof EVENT_TYPES)[number];
 
-export type Phase =
-  | 'PLANNING'
-  | 'STORYBOARD'
-  | 'ART'
-  | 'DEVELOPMENT'
-  | 'INTERNAL_REVIEW'
-  | 'ALPHA'
-  | 'CLIENT_REVIEW'
-  | 'QA'
-  | 'BETA'
-  | 'POST_DELIVERY';
+/** In project order: a later phase means the work it concerns is further along. */
+export const PHASES = [
+  'PLANNING',
+  'STORYBOARD',
+  'ART',
+  'DEVELOPMENT',
+  'INTERNAL_REVIEW',
+  'ALPHA',
+  'CLIENT_REVIEW',
+  'QA',
+  'BETA',
+  'POST_DELIVERY',
+] as const;
+export type Phase = (typeof PHASES)[number];
 
 /** A new task as given to ADD_TASK. New work cannot arrive with progress. */
 export type TaskDef = Omit<Task, 'progress'>;

@@ -311,61 +311,100 @@ All computed from stored snapshots; nothing extra is persisted.
 
 ---
 
-## 4. Database schema (SQLite)
+## 4. Database schema (SQLite), as built
+
+Uses Node's built-in `node:sqlite`, so there is nothing to install or compile. In Node 24 it works without a flag but prints a one-line "experimental" warning. Source: [packages/server/src/db/schema.ts](packages/server/src/db/schema.ts).
+
+Changes from the first sketch, all deliberate:
+
+- **Keys are scoped by project** (`PRIMARY KEY (project_id, id)`), so two projects can both have a task `m1.dev`.
+- **Holidays are a JSON column on `projects`**, not a table. They freeze together with the rest of the calendar.
+- **`people`, `requirements` and `ownership_history` are not built yet.** Ownership history can be derived from the log (`TRANSFER_OWNER` effects) when the Retro view needs it.
+- **`forecast_snapshots` stores the whole snapshot as JSON** plus a few columns for querying, and carries a `plan_revision` (see below).
+- `features.shared_task_id` has no foreign key: it may name a task that only exists once an event has added it.
 
 ```sql
-projects          (id PK, name, start_date, target_date, weekend_days TEXT /*json*/, delivery_task_id)
-holidays          (project_id, date)
-teams             (id PK, project_id, name)
-people            (id PK, team_id, name)
-team_capacity     (team_id, from_date, headcount)                    -- first row = planned
-modules           (id PK, project_id, name, kind /*DELIVERABLE|SHARED|PROJECT*/, scope_json, locked_at NULL)
-tasks             (id PK, project_id, module_id, team_id, owner_id NULL, kind /*TASK|MILESTONE*/, name,
-                   estimate REAL, start_no_earlier_than NULL, feature_id NULL)
-dependencies      (predecessor_id, successor_id, type DEFAULT 'FS', PRIMARY KEY (predecessor_id, successor_id))
-features          (id PK, project_id, name, shared_task_id NULL)
-module_features   (module_id, feature_id)
-requirements      (id PK, project_id, module_id NULL, text, status, discovered_phase)
-events            (id PK, project_id, seq INTEGER, type, category, title, description, phase, module_id, task_id,
+projects          (id PK, name, start_date, target_date, weekend_days JSON, holidays JSON, delivery_task_id,
+                   plan_revision, started_at, created_at)
+teams             (project_id, id, name)
+team_capacity     (project_id, team_id, from_date, headcount)           -- earliest row per team = planned
+modules           (project_id, id, name, kind /*DELIVERABLE|SHARED|PROJECT*/, scope_json, locked_at)
+tasks             (project_id, id, module_id, team_id, owner_id, kind /*TASK|MILESTONE*/, name,
+                   estimate, start_no_earlier_than, feature_id)
+dependencies      (project_id, predecessor_id, successor_id, type 'FS')
+features          (project_id, id, name, shared_task_id)
+module_features   (project_id, module_id, feature_id)
+events            (project_id, id, seq, type, category, title, description, phase, module_id, task_id,
                    created_by, source_team_id, affected_team_id, affected_person_id,
-                   occurred_at, recorded_at, as_of, parent_event_id,
-                   linked_requirement_id, linked_feature_id, could_have_been_earlier,
-                   est_effort, est_schedule, actual_effort, actual_schedule, effects_json)
-event_voids       (id PK, project_id, seq INTEGER, event_id, as_of, reason, recorded_at)   -- seq is shared with events
-forecast_snapshots(id PK, project_id, revision, trigger_event_id NULL, as_of, recorded_at,
+                   occurred_at, recorded_at, as_of, parent_event_id, linked_requirement_id, linked_feature_id,
+                   could_have_been_earlier, est_effort, est_schedule, actual_effort, actual_schedule, effects_json)
+event_voids       (project_id, id, seq, event_id, as_of, reason, recorded_at)    -- seq is shared with events
+forecast_snapshots(project_id, plan_revision, revision, kind, event_id, void_id, as_of, recorded_at,
                    baseline_delivery, forecast_delivery, variance_days, step_days, effort_impact,
-                   critical_path_json, schedule_json, modules_json, engine_version)
-ownership_history (task_id, person_id, from_date, to_date NULL, event_id NULL)
+                   engine_version, snapshot_json)
 ```
 
-**Enforced in the database, not only in code**
+**Enforced in the database, not only in code.** Each of these is tested by running raw SQL that bypasses the API.
 
-- `BEFORE INSERT/UPDATE/DELETE` on `tasks` aborts if the module has `locked_at` set. New work after lock must come through an event.
-- `BEFORE INSERT/DELETE` on `dependencies` aborts if the *successor's* module is locked.
-- `BEFORE UPDATE/DELETE` on `forecast_snapshots`, `events` and `event_voids` aborts. The log is append-only; corrections are new rows.
+- A task of a **locked module** cannot be inserted, changed, moved into, or deleted. New work after lock must be an event.
+- A **dependency** whose successor is in a locked module cannot be added or removed.
+- A locked module cannot be changed, unlocked or deleted.
+- Once the **project has started**, its calendar, delivery milestone, teams, capacity and features are frozen. Name and target date stay editable: they are only labels.
+- `events`, `event_voids` and `forecast_snapshots` are **append-only**. Corrections are new rows.
+
+All trigger messages begin `LOCKED:`, which the API turns into `409`.
+
+**What is stored and what is derived.** Stored: the baseline rows, the log (events and voids) and the snapshots as they were recorded. Derived on each request: the engine's current plan, by replaying the log over the baseline. Recording, previewing, attribution and advisories use the replay. History views (forecast, snapshots, timeline) read the stored snapshots, so history shows what was recorded at the time even if the algorithm later changes.
+
+### Plan revisions: how per-module locking works with one baseline
+
+The engine assumes one baseline for the whole history. Per-module locking means modules not yet started can still be refined after others have started. Both hold because of **plan revisions**:
+
+- The first lock starts the project and writes the whole history under plan revision 1.
+- A planning edit to an **unlocked** module after that (a task estimate, a dependency, a new module) moves the baseline. The server replays the log over the new baseline and writes a **complete new set of snapshots under revision 2**. Earlier revisions are kept, never updated or deleted, and views follow the current revision.
+- If an existing event could no longer apply (it referred to a task the edit removed), or the edit makes the plan invalid, the edit is refused with `409 EDIT_BREAKS_HISTORY` and **nothing changes**.
+- `POST /projects/:id/rebuild-history` writes a new revision with the current engine, to adopt a newer algorithm. The old revision is kept.
+
+Effect: refining an unlocked module is treated as planning, not delay. If M7 is re-planned from 5 to 8 days of development and that makes the original plan a day longer, the original delivery date moves with it, and an earlier M5 slip stops showing as variance because it is now hidden behind M7's longer plan. Both views remain available.
 
 ---
 
-## 5. API contract (REST + JSON)
+## 5. API (REST + JSON), as built
 
-| Method & path | Purpose |
+Run it with `npm start -w @multiverse/server` (default `http://127.0.0.1:4000`). Examples for each flow are in [docs/API.md](docs/API.md). All bodies are strict: an unknown or misspelled field is a `400` naming its path.
+
+| Group | Endpoints |
 |---|---|
-| `POST /projects`, `GET /projects/:id` | Create project / load full model |
-| `POST/PATCH/DELETE /projects/:id/{teams,people,modules,tasks,dependencies,features,capacity}` | Blueprint editing. Rejected with `409` on locked modules |
-| `POST /projects/:id/modules/:mid/lock` | Freeze baseline. The first lock also writes revision 0 |
-| `GET /projects/:id/advisories` | Common-feature findings (more later) |
-| `POST /projects/:id/events/preview` | **Dry run.** Body is an event with effects. Returns `{ effortImpact, scheduleImpact, deliveryBefore, deliveryAfter, criticalPathBefore, criticalPathAfter, affectedTasks, moduleDeltas, absorbed }`. Persists nothing |
-| `POST /projects/:id/events` | Persist event, apply effects, write snapshot. Returns `{ event, snapshot, branch? }` |
-| `POST /projects/:id/events/:eid/void` | Void a mistaken event, writes a correcting snapshot |
-| `GET /projects/:id/events` | Filter by type, phase, module, team |
-| `GET /projects/:id/forecast` | Current forecast + critical path |
-| `GET /projects/:id/snapshots`, `/snapshots/:sid` | Forecast history |
-| `GET /projects/:id/timeline` | Original line + one branch per deviating module (with steps), for the Multiverse view |
-| `GET /projects/:id/milestones/:tid/history` | Forecast history of one milestone (spec §20) |
-| `GET /projects/:id/control-room` | Original, forecast, variance, progress, bottleneck, top contributors |
-| `GET /projects/:id/retro?strategy=sequential` | Planned vs actual, contributors, late-feedback %, ownership history |
+| Health | `GET /health` |
+| Projects | `POST /projects` · `GET /projects` · `GET /projects/:id` · `PATCH /projects/:id` (name, target date; calendar until started) · `PUT /projects/:id/delivery` · `GET /projects/:id/validate` |
+| Blueprint | `PUT /projects/:id/blueprint` (whole plan at once, before start) · `POST/PATCH/DELETE` on `/teams`, `/modules`, `/tasks`, `/features` · `POST /capacity`, `DELETE /capacity?teamId=&from=` · `POST /dependencies`, `DELETE /dependencies/:predecessorId/:successorId` |
+| Locking | `POST /projects/:id/modules/:moduleId/lock` (first lock starts the project and writes revision 0) |
+| Events | `POST /projects/:id/events/preview` · `POST /projects/:id/events` · `GET /projects/:id/events` (filter by `type`, `phase`, `moduleId`, `teamId`, `status`) · `GET /projects/:id/events/:eventId` · `POST /projects/:id/events/:eventId/void` |
+| Views | `GET /projects/:id/forecast` · `/snapshots` (`?full=true`) · `/snapshots/:revision` · `/timeline` · `/history` · `/milestones/:taskId/history` · `/advisories` (`?minModules=`) · `/attribution` (`?strategy=sequential\|counterfactual`) |
+| Plan | `GET /projects/:id/plan` · `/plan-revisions` · `POST /projects/:id/rebuild-history` |
 
-`preview` is how the spec's step 6→7 works: the developer says "+2 days", the system answers "delivery moves 2 working days (30 Oct → 3 Nov), critical path: yes".
+`preview` is how the spec's step 6→7 works: the developer says "+2 days", the system answers with the schedule and effort impact, whether it is on the critical path, and the modules affected. It applies exactly the checks recording does and writes nothing.
+
+**Errors** are always `{ error, message, details? }`:
+
+| Status | `error` | Meaning |
+|---|---|---|
+| 400 | `BAD_REQUEST` | Malformed JSON, or a field is missing, misspelled, or invalid (`details` lists each path) |
+| 404 | `NOT_FOUND` | No such project, task, event, snapshot or route |
+| 409 | `LOCKED` | The database refused: the module is locked or the project has started |
+| 409 | `NOT_STARTED` | Lock a module first |
+| 409 | `ALREADY_LOCKED`, `PROJECT_STARTED`, `ALREADY_EXISTS`, `ALREADY_VOIDED`, `REFERENCE` | State conflicts |
+| 409 | `CANNOT_VOID` | A later event relied on the one you are voiding |
+| 409 | `EDIT_BREAKS_HISTORY` | A planning edit would invalidate recorded history; nothing was changed |
+| 422 | `INVALID_PLAN` | The blueprint is not a valid plan; `details` lists every problem |
+| 422 | `EVENT_REJECTED` | The event cannot be applied, or names things that do not exist; the message names the effect |
+| 500 | `INTERNAL` | Unexpected. The body never contains internals; details are in the server log |
+
+**Atomicity.** Every write is one transaction. A rejected event leaves no row behind, and the next event still takes the next number in the log.
+
+**Security.** There is no authentication: it is a local tool. The server listens on `127.0.0.1` only unless `HOST` is set, so nothing else on the network can reach it. Do not expose it without adding authentication.
+
+**Not built yet:** `control-room` and `retro` (step 6, they need the progress and bottleneck calculations in the engine), people and ownership endpoints, and CORS (needed when the UI is served from a different port).
 
 ---
 
@@ -443,6 +482,9 @@ Resolved: branches are per deviating module, and capacity ignores contention. St
 5. **Late-discovery classification** (§3.7) depends on knowing when a module's development started, from `RECORD_PROGRESS` effects. If nobody records progress, the classifier falls back to the event's `phase`.
 6. **Hero scenario differs from the spec's numbers.** The spec says "estimated effort 2 days"; here each of the 7 modules gets a 2-day task (14 effort-days, +2 schedule). You said the numbers are illustrative, so I chose the version that exercises per-module branches.
 7. **"On plan unless told otherwise" (§3.2 carry-forward).** Between events, the engine assumes tasks progress as the previous forecast said. This keeps data entry light but means a quietly late task looks on time until someone records it. Is that the right default for the first trial, or should an unrecorded task past its forecast finish be flagged?
+8. **Refining an unlocked module after the project has started (§4 plan revisions).** The server allows it and rebuilds history under a new plan revision, keeping the old one. The alternative is to forbid any plan edit once the first module is locked, which is simpler but makes per-module locking pointless. Is the revision behaviour what you want?
+9. **Events on unlocked modules.** The engine and server accept an event that touches a module that has not been locked, and carry-forward can mark such a module's tasks as started. That is probably a data-entry mistake (an unlocked module's scope should simply be edited). Should the server refuse or warn?
+10. **No authentication.** Fine for a local tool bound to `127.0.0.1`. Needed before anyone else uses it over a network.
 
 ---
 
@@ -454,5 +496,5 @@ Follows spec §30. Each step ends in something testable.
 2. **Engine core**: calendar → graph → capacity → forward/backward pass → T1, plus plan-level equivalents of T2–T4. *(done: 59 tests passing)*
 3. **Effects + replay + snapshots + explanation**: T2, T3, T4, HS, CAP, recovery and void all pass through the event log. This is the spec §39 milestone as a test. *(done: 169 tests passing; step 4 below builds on `explainSnapshot`)*
 4. **Attribution + advisories + timeline builder**, with strategy interface. *(done: 242 tests passing)*
-5. **Server + SQLite + seed** and the API from §5, tested with the Thriveni seed.
+5. **Server + SQLite + seed** and the API from §5, tested with the Thriveni seed. *(done: 89 server tests, plus a manual run of the real seed and server)*
 6. **Multiverse timeline UI**, then Control Room, then Retro view.

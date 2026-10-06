@@ -1,0 +1,22 @@
+{
+  "name": "@multiverse/server",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "seed": "tsx src/seed-cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "tsx": "^4.23.15"
+  },
+  "dependencies": {
+    "@multiverse/engine": "*",
+    "fastify": "^5.12.5",
+    "zod": "^4.6.5"
+  }
+}
