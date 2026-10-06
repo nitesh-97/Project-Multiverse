@@ -1,9 +1,18 @@
 import type { CalendarSpec, ISODate } from './types';
 
-export const EPS = 1e-9;
+/**
+ * Comparison tolerance for offsets, in working days (about 8 ms of a day). Deliberately 100,000x coarser than the
+ * rounding grid of {@link snap}, so rounding drift accumulated over a long history can never flip a comparison
+ * (for example, a task that ends exactly at the end of a day being reported as finishing on the next day).
+ */
+export const EPS = 1e-7;
 
-/** Removes floating-point noise (0.1 + 0.2) so offsets compare and print cleanly. */
-export const snap = (x: number): number => Math.round(x * 1e9) / 1e9;
+/**
+ * Rounds to a 1e-12 grid to remove floating-point noise (0.1 + 0.2) so offsets print cleanly. The grid is fine so
+ * that the error from rounding stays negligible when forecasts are carried forward many times. Exact for offsets up
+ * to roughly 9,000 working days. Normalises -0 to 0.
+ */
+export const snap = (x: number): number => Math.round(x * 1e12) / 1e12 + 0;
 
 const MS_PER_DAY = 86_400_000;
 const MAX_WORKING_DAYS = 100_000;
@@ -18,6 +27,15 @@ function toDayNumber(iso: ISODate): number {
     throw new RangeError(`Invalid date "${iso}"`);
   }
   return Math.round(ms / MS_PER_DAY);
+}
+
+export function isISODate(value: string): boolean {
+  try {
+    toDayNumber(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function fromDayNumber(n: number): ISODate {

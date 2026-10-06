@@ -48,6 +48,21 @@ export class CapacityModel {
     return factor;
   }
 
+  /** Effort-days a team gets done between offsets `from` and `to`. The inverse of {@link timeToComplete}. */
+  workBetween(teamId: TeamId, from: number, to: number): number {
+    if (to <= from + EPS) return 0;
+    if (!this.steps.has(teamId)) return snap(to - from);
+    let t = from;
+    let total = 0;
+    while (t < to - EPS) {
+      const day = Math.floor(t + EPS);
+      const end = Math.min(day + 1, to);
+      total += (end - t) * this.factorOnDay(teamId, day);
+      t = end;
+    }
+    return snap(total);
+  }
+
   /**
    * The offset at which `work` effort-days, started at offset `from`, will be complete.
    * Walks day by day so that capacity changes in the middle of a task are honoured.

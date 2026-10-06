@@ -1,4 +1,38 @@
-import type { CapacityPoint, Plan, TaskProgress } from '../src';
+import type { CapacityPoint, Effect, Event, EventType, Plan, TaskProgress } from '../src';
+
+/** An event with sensible defaults. `asOf` doubles as occurredAt. */
+export function makeEvent(
+  id: string,
+  asOf: string,
+  effects: Effect[],
+  extra: Partial<Event> & { type?: EventType } = {},
+): Event {
+  return {
+    id,
+    type: 'FEEDBACK',
+    category: 'Requirement',
+    title: id,
+    description: '',
+    phase: 'DEVELOPMENT',
+    createdBy: 'tester',
+    occurredAt: asOf,
+    asOf,
+    effects,
+    ...extra,
+  };
+}
+
+export const adjust = (taskId: string, delta: number): Effect => ({ op: 'ADJUST_ESTIMATE', taskId, delta });
+
+/** The late-extinguisher event: every Thriveni module gets a 2-day integration task between its Dev and Alpha. */
+export function extinguisherEffects(): Effect[] {
+  return [1, 2, 3, 4, 5, 6, 7].map((n): Effect => ({
+    op: 'ADD_TASK',
+    task: { id: `m${n}.ext`, moduleId: `m${n}`, teamId: 'dev', kind: 'TASK', name: `m${n} extinguisher`, estimate: 2 },
+    dependsOn: [`m${n}.dev`],
+    blocks: [`m${n}.alpha`],
+  }));
+}
 
 export interface TaskSpec {
   id: string;

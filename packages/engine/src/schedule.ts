@@ -19,6 +19,10 @@ export interface ScheduledTask {
   duration: number;
   startDate: ISODate;
   finishDate: ISODate;
+  /** The offset from which the remaining effort is burned: the status date for in-progress work, `start` otherwise. */
+  burnStart: number;
+  /** Effort left to do at `burnStart`, in work-days at planned capacity. 0 for finished work and milestones. */
+  remainingEffort: number;
   /** How far this task can slip before the delivery date moves. <= 0 means critical. */
   totalFloat: number;
   /** How far this task can slip before any successor's start moves. */
@@ -85,6 +89,8 @@ export function schedule(plan: Plan, asOf?: ISODate): Schedule {
     state: TaskState;
     start: number;
     finish: number;
+    burnStart: number;
+    remainingEffort: number;
     driver: TaskId | null;
   }
   const placed = new Map<TaskId, Placed>();
@@ -94,29 +100,61 @@ export function schedule(plan: Plan, asOf?: ISODate): Schedule {
     const task = must(taskById, id);
     const progress = task.progress;
 
-    if (progress?.finishedOn !== undefined) {
-      if (asOf === undefined) throw new PlanError(`Task ${id} has progress recorded but no asOf date was given`);
+    const finishedAt =
+      progress?.finishedAt ?? (progress?.finishedOn !== undefined ? cal.endOffset(progress.finishedOn) : undefined);
+    const startedAt =
+      progress?.startedAt ?? (progress?.startedOn !== undefined ? cal.startOffset(progress.startedOn) : undefined);
+
+    if (
+      asOf === undefined &&
+      (finishedAt !== undefined || (startedAt !== undefined && task.kind === 'TASK'))
+    ) {
+      throw new PlanError(`Task ${id} has progress recorded but no asOf date was given`);
+    }
+
+    if (finishedAt !== undefined && progress) {
       // Compared as dates: the start of one day and the end of the previous day are the same offset.
-      if (progress.startedOn !== undefined && progress.startedOn > progress.finishedOn) {
+      if (
+        progress.startedOn !== undefined &&
+        progress.finishedOn !== undefined &&
+        progress.startedOn > progress.finishedOn
+      ) {
         throw new PlanError(`Task ${id} finished before it started`);
       }
-      const finish = cal.endOffset(progress.finishedOn);
       const start =
         task.kind === 'MILESTONE'
-          ? finish
-          : cal.startOffset(progress.startedOn ?? progress.finishedOn);
-      if (finish > statusOffset + EPS) throw new PlanError(`Task ${id} is recorded as finished after the status date ${asOf}`);
-      placed.set(id, { task, state: 'DONE', start, finish, driver: null });
+          ? finishedAt
+          : (startedAt ?? (progress.finishedOn !== undefined ? cal.startOffset(progress.finishedOn) : finishedAt));
+      if (start > finishedAt + EPS) throw new PlanError(`Task ${id} finished before it started`);
+      if (finishedAt > statusOffset + EPS) {
+        throw new PlanError(`Task ${id} is recorded as finished after the status date ${asOf}`);
+      }
+      placed.set(id, {
+        task,
+        state: 'DONE',
+        start: snap(start),
+        finish: snap(finishedAt),
+        burnStart: snap(finishedAt),
+        remainingEffort: 0,
+        driver: null,
+      });
       continue;
     }
 
-    if (progress?.startedOn !== undefined && task.kind === 'TASK') {
-      if (asOf === undefined) throw new PlanError(`Task ${id} has progress recorded but no asOf date was given`);
-      const start = cal.startOffset(progress.startedOn);
-      if (start > statusOffset + EPS) throw new PlanError(`Task ${id} is recorded as started after the status date ${asOf}`);
+    if (startedAt !== undefined && progress && task.kind === 'TASK') {
+      if (startedAt > statusOffset + EPS) {
+        throw new PlanError(`Task ${id} is recorded as started after the status date ${asOf}`);
+      }
       const remaining = progress.remaining ?? task.estimate;
-      const finish = capacity.timeToComplete(task.teamId, statusOffset, remaining);
-      placed.set(id, { task, state: 'IN_PROGRESS', start, finish, driver: null });
+      placed.set(id, {
+        task,
+        state: 'IN_PROGRESS',
+        start: snap(startedAt),
+        finish: capacity.timeToComplete(task.teamId, statusOffset, remaining),
+        burnStart: statusOffset,
+        remainingEffort: remaining,
+        driver: null,
+      });
       continue;
     }
 
@@ -135,8 +173,16 @@ export function schedule(plan: Plan, asOf?: ISODate): Schedule {
     }
     const start = snap(Math.max(floor, predFinish));
     const driver = predDriver !== null && predFinish >= floor - EPS ? predDriver : null;
-    const finish = task.kind === 'MILESTONE' ? start : capacity.timeToComplete(task.teamId, start, task.estimate);
-    placed.set(id, { task, state: 'NOT_STARTED', start, finish, driver });
+    const isMilestone = task.kind === 'MILESTONE';
+    placed.set(id, {
+      task,
+      state: 'NOT_STARTED',
+      start,
+      finish: isMilestone ? start : capacity.timeToComplete(task.teamId, start, task.estimate),
+      burnStart: start,
+      remainingEffort: isMilestone ? 0 : task.estimate,
+      driver,
+    });
   }
 
   const delivery = must(placed, plan.deliveryTaskId);
@@ -183,6 +229,8 @@ export function schedule(plan: Plan, asOf?: ISODate): Schedule {
       duration,
       startDate: duration > EPS ? cal.startDateAtOffset(p.start) : finishDate,
       finishDate,
+      burnStart: p.burnStart,
+      remainingEffort: p.remainingEffort,
       totalFloat,
       freeFloat,
       critical,

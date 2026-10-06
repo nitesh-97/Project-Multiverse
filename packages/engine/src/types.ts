@@ -40,12 +40,18 @@ export interface Module {
   kind: ModuleKind;
 }
 
-/** Actuals recorded against a task. `finishedOn` / `startedOn` follow the day conventions in DESIGN.md §3.1. */
+/**
+ * Actuals for a task. `startedOn` / `finishedOn` are what a person records and follow the day conventions in
+ * DESIGN.md §3.1. `startedAt` / `finishedAt` are exact working-day offsets written by the engine when it carries a
+ * forecast forward (DESIGN.md §3.2); when present they take precedence over the dates.
+ */
 export interface TaskProgress {
   startedOn?: ISODate;
-  /** Effort still to do, in work-days at planned capacity. Defaults to the full estimate. */
+  startedAt?: number;
+  /** Effort still to do as of the status date, in work-days at planned capacity. Defaults to the full estimate. */
   remaining?: WorkDays;
   finishedOn?: ISODate;
+  finishedAt?: number;
 }
 
 export interface Task {
@@ -58,6 +64,8 @@ export interface Task {
   estimate: WorkDays;
   /** Earliest date work may start (start of that day). */
   startNoEarlierThan?: ISODate;
+  /** Current owner; informational only, the schedule does not use it. */
+  ownerId?: string;
   progress?: TaskProgress;
 }
 

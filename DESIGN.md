@@ -87,12 +87,11 @@ interface Event {
   phase: Phase;                    // PLANNING | STORYBOARD | ART | DEVELOPMENT | INTERNAL_REVIEW | ALPHA | CLIENT_REVIEW | QA | BETA | POST_DELIVERY
   createdBy: string; sourceTeamId?: string; affectedTeamId?: string; affectedOwnerId?: string;
   occurredAt: ISODate;             // when it happened in the real world
-  recordedAt: Timestamp;           // when it was entered (system-set)
-  asOf: ISODate;                   // status date used for the forecast it triggers (default occurredAt, clamped >= previous asOf)
+  asOf: ISODate;                   // status date (end of that working day) used for the forecast it triggers; clamped >= previous asOf
+  // projectId and recordedAt (system-set) live on the stored row, not on the engine's Event
   couldHaveBeenEarlier?: boolean;
   estimatedEffortImpact?: WorkDays;   estimatedScheduleImpact?: WorkDays;  // from preview, §5
   actualEffortImpact?: WorkDays;      actualScheduleImpact?: WorkDays;     // filled in later
-  status: 'ACTIVE' | 'VOIDED';
   parentEventId?: string; linkedRequirementId?: string; linkedFeatureId?: string;
   effects: Effect[];
 }
@@ -107,18 +106,29 @@ type Effect =
   | { op: 'REMOVE_TASK';       taskId: TaskId }                                         // scope removed
   | { op: 'ADD_DEPENDENCY';    predecessorId: TaskId; successorId: TaskId }
   | { op: 'REMOVE_DEPENDENCY'; predecessorId: TaskId; successorId: TaskId }
-  | { op: 'BLOCK_UNTIL';       taskId: TaskId; date: ISODate }                          // external dependency / blocker: earliest start
+  | { op: 'BLOCK_UNTIL';       taskId: TaskId; date: ISODate | null }                   // external dependency / blocker: sets earliest start (replaces any earlier one); null clears
   | { op: 'SET_CAPACITY';      teamId: TeamId; from: ISODate; headcount: number }
-  | { op: 'RECORD_PROGRESS';   taskId: TaskId; startedOn?: ISODate; remaining?: WorkDays; finishedOn?: ISODate }
+  | { op: 'RECORD_PROGRESS';   taskId: TaskId; startedOn?: ISODate | null; remaining?: WorkDays | null; finishedOn?: ISODate | null }
   | { op: 'TRANSFER_OWNER';    taskId: TaskId; toPersonId: PersonId; contextCost?: WorkDays };  // contextCost becomes added effort
 ```
+
+Rules the engine enforces (each failure is an `EffectError` naming the event and the effect):
+
+- **Started work cannot be made to wait for something new.** `ADD_TASK.blocks`, `ADD_DEPENDENCY` and `BLOCK_UNTIL` are rejected on a task that has started. Silently ignoring them would let someone believe they had changed the forecast.
+- **Finished work cannot be re-estimated, re-owned or removed.** Rework is a new `ADD_TASK`. `REMOVE_TASK` is rejected once a task has started.
+- **`REMOVE_TASK` reconnects the chain.** Removing `X` from `A → X → B` leaves `A → B`, as if `X` took no time. The delivery milestone cannot be removed.
+- **`SET_CAPACITY` only changes capacity** after the team's planned-headcount date; it cannot redefine the plan.
+- **`RECORD_PROGRESS` merges.** Fields left out are kept, `null` clears one, recording `finishedOn` clears `remaining`, and `remaining` needs a start date.
+- **Duplicates and typos fail loudly**: an existing dependency, a missing one being removed, an unknown task, a malformed date.
+- The result must still be a valid plan: no cycles, no dangling references.
 
 - **Effort impact** of an event = sum of estimate added or removed by its effects (`ADD_TASK`, `ADJUST_ESTIMATE`, `REMOVE_TASK`, `TRANSFER_OWNER.contextCost`). Capacity, blockers and dependencies have zero effort impact.
 - **Schedule impact** of an event = change in project variance caused by applying it (§3.5). It is *computed*, never typed in.
 
 ### 2.3 Other conventions
 
-- **Corrections.** Events are never edited or deleted. A mistaken event is set to `VOIDED`: replay skips it, and a new snapshot records the correction.
+- **The log.** The project history is an ordered log whose entries are either an `EVENT` or a `VOID`. Engine functions take and return this log; persistence assigns each entry a `seq`.
+- **Corrections.** Events are never edited or deleted. A mistaken event is withdrawn by a `VOID` entry that names it. The plan is rebuilt from the baseline without that event (effects do not always commute, so subtracting is not enough) and a `VOID` snapshot records the change, with negative effort and schedule impact. A void is refused if a later event relied on the one being withdrawn (for example, it adjusted a task the voided event added).
 - **Back-dated events** are allowed. They keep their true `occurredAt`. The snapshot's `asOf` is clamped so it never goes earlier than the previous snapshot's.
 - **Ownership** is a separate append-only table. An `OWNERSHIP_TRANSFER` event writes a row and may add context-transfer effort.
 - **No individual metrics.** There are no per-person delay or efficiency views anywhere (spec §5.2, §36). Ownership history is for traceability only.
@@ -137,12 +147,16 @@ type Effect =
 ### 3.2 Pipeline
 
 ```
-Baseline plan ─┐
-               ├─ replay(effects up to event k) ─► Current plan ─► schedule(asOf) ─► Schedule ─► Snapshot k
-Events 1..k  ──┘
+Snapshot k-1 ─► carry forward to asOf(k) ─► apply event k's effects ─► schedule(asOf) ─► Snapshot k
+(plan + forecast)  (on-plan unless recorded)     (typed, validated)
 ```
 
-`schedule(plan, asOf)` is a pure function. Same inputs, same output, always.
+`schedule(plan, asOf)` is a pure function. Same inputs, same output, always. Every step is a pure function of the previous state, so history is an immutable chain and the old forecast is preserved by construction.
+
+**Carry-forward.** Between events nobody may have recorded progress, so the previous forecast is treated as what happened unless someone says otherwise. Tasks it had finished by the new status date become finished (at its exact offsets), tasks it had started become in progress with the effort left after burning at the team's capacity, and the rest are untouched. A `RECORD_PROGRESS` effect overrides it with the truth.
+Without this, any event with a later status date would silently re-plan every unrecorded task from that date, and the forecast would jump for no reason. It also keeps data entry light: events matter, progress reports are optional. A property test checks that carrying a forecast forward with no other change reproduces it exactly.
+
+**Known limitation.** "On plan unless told otherwise" means forecasts are only as honest as the recorded actuals. A task that is quietly running late but has no `RECORD_PROGRESS` or delay event will still look on time. Surfacing that (for example, a nudge when a task passes its forecast finish without being recorded) is future work.
 
 ### 3.3 Scheduling algorithm (forward / backward pass)
 
@@ -181,7 +195,7 @@ Storing `baselineDelivery` in each snapshot handles module-level locking. If som
 
 The same logic applies per module: each snapshot stores every module's `baselineFinish` and `forecastFinish` (the finish of its last task), which is what the branches in §3.6 are built from.
 
-Revision 0 is created when the first module is locked. A snapshot contains: per-task start/finish/float, per-module and per-milestone baseline vs forecast, the critical path, the trigger event, the effort impact, and an `engineVersion`. Snapshots are append-only (enforced by DB triggers). Because they store *results*, history survives a later change to the algorithm.
+Revision 0 is created when the first module is locked. A snapshot contains: per-task start/finish/float, per-module and per-milestone baseline vs forecast, the critical path, the trigger event, the effort impact, and an `engineVersion`. Snapshots are append-only (enforced by DB triggers). Because they store *results*, history survives a later change to the algorithm. Variance and step are reported to a millionth of a working day, so numerical noise can never read as a real change (a step of 0.000000001 would otherwise create a phantom branch).
 
 ### 3.6 Multiverse timeline (branches)
 
@@ -273,9 +287,10 @@ module_features   (module_id, feature_id)
 requirements      (id PK, project_id, module_id NULL, text, status, discovered_phase)
 events            (id PK, project_id, seq INTEGER, type, category, title, description, phase, module_id, task_id,
                    created_by, source_team_id, affected_team_id, affected_person_id,
-                   occurred_at, recorded_at, as_of, status DEFAULT 'ACTIVE', parent_event_id,
+                   occurred_at, recorded_at, as_of, parent_event_id,
                    linked_requirement_id, linked_feature_id, could_have_been_earlier,
                    est_effort, est_schedule, actual_effort, actual_schedule, effects_json)
+event_voids       (id PK, project_id, seq INTEGER, event_id, as_of, reason, recorded_at)   -- seq is shared with events
 forecast_snapshots(id PK, project_id, revision, trigger_event_id NULL, as_of, recorded_at,
                    baseline_delivery, forecast_delivery, variance_days, step_days, effort_impact,
                    critical_path_json, schedule_json, modules_json, engine_version)
@@ -286,7 +301,7 @@ ownership_history (task_id, person_id, from_date, to_date NULL, event_id NULL)
 
 - `BEFORE INSERT/UPDATE/DELETE` on `tasks` aborts if the module has `locked_at` set. New work after lock must come through an event.
 - `BEFORE INSERT/DELETE` on `dependencies` aborts if the *successor's* module is locked.
-- `BEFORE UPDATE/DELETE` on `forecast_snapshots` and `events` (except the `status` column) aborts.
+- `BEFORE UPDATE/DELETE` on `forecast_snapshots`, `events` and `event_voids` aborts. The log is append-only; corrections are new rows.
 
 ---
 
@@ -351,7 +366,9 @@ HS deliberately models what actually happened on Thriveni: the extinguisher was 
 
 Combined check for attribution: apply T2, then T3, then HS in order. Sequential contributions are `0, +1, +2` and must sum to the final variance of **+3** (offset 23 vs 20 → forecast Wed 4 Nov).
 
-A capacity scenario (Dev 4 → 2 people from a chosen day) is added with its own hand-computed numbers when the capacity code is written. Their correctness matters, and I don't want to publish numbers I haven't verified.
+**CAP (capacity).** Event recorded Tue 13 Oct (offset 7): Dev drops from 4 to 2 people from Wed 14 Oct. Every Dev task with work left now takes twice as long: M5 Dev 6d → 12d (ends 19), M3 Dev 5d → 10d (ends 17), client changes 2d → 4d, integration 1d → 2d. So 19 + review 1 + changes 4 + integration 2 + QA 2 + beta 1 = **29**. Expected: effort **0**, schedule **+9** → **Thu 12 Nov**; M1–M7 and the delivery lane all deviate DIRECT (the capacity change touches them), while the Shared module is unaffected because its work finished by day 7. This is the "describe it as a capacity change, not underperformance" case (spec §15).
+
+**Status dates.** T2–T4, HS and CAP are recorded with status dates of 13–14 Oct, when most Dev work is under way, so they exercise carry-forward. A further case, **recovery**, records "M5 Dev finished Fri 16 Oct" (planned for 13 days, done at 10): delivery moves **−1** to Thu 29 Oct and no further, because M3 (12) now sets the pace. The explanation attributes the gain to M5 even though the critical path moved to M3.
 
 ---
 
@@ -369,7 +386,8 @@ Pure-function tests in `packages/engine`, run by Vitest, before any server or UI
 8. **Snapshots**: append-only, forecast history preserved, `stepDays` telescopes to total variance.
 9. **Attribution**: contributions sum to variance for both strategies on every scenario (counterfactual includes the interaction remainder).
 10. **Advisory**: Extinguisher with 7 modules and no shared task is flagged; adding a shared task clears it.
-11. **Branches**: one per deviating module; DIRECT vs PROPAGATED origin and `fromModuleIds`; `absorbed` flag (T2); critical-path switch (T4); recovery and `MERGED`; no branch for a module that never deviates.
+11. **Branches**: one per deviating module; DIRECT vs PROPAGATED origin and `fromModuleIds`; `absorbed` flag (T2); critical-path switch (T4); recovery and `MERGED`; no branch for a module that never deviates. *(the explanation data for these is tested in step 3; the branch builder itself is step 4)*
+12. **Carry-forward**: jumping to, or stepping through, any status date with no other change reproduces the baseline forecast exactly. Checked on Thriveni, Thriveni with a mid-project Dev cut, and fractional estimates with a 2/3 capacity factor (the worst case for rounding drift).
 
 ---
 
@@ -383,6 +401,7 @@ Resolved: branches are per deviating module, and capacity ignores contention. St
 4. **Variance is measured against the computed baseline**, not against `target_date`. In the seed they coincide. When they differ the Control Room should show both ("2 days of float to target" vs "+3 behind baseline"). This is not designed yet.
 5. **Late-discovery classification** (§3.7) depends on knowing when a module's development started, from `RECORD_PROGRESS` effects. If nobody records progress, the classifier falls back to the event's `phase`.
 6. **Hero scenario differs from the spec's numbers.** The spec says "estimated effort 2 days"; here each of the 7 modules gets a 2-day task (14 effort-days, +2 schedule). You said the numbers are illustrative, so I chose the version that exercises per-module branches.
+7. **"On plan unless told otherwise" (§3.2 carry-forward).** Between events, the engine assumes tasks progress as the previous forecast said. This keeps data entry light but means a quietly late task looks on time until someone records it. Is that the right default for the first trial, or should an unrecorded task past its forecast finish be flagged?
 
 ---
 
@@ -392,7 +411,7 @@ Follows spec §30. Each step ends in something testable.
 
 1. **Scaffold** the workspace, TypeScript, Vitest, typecheck. *(done)*
 2. **Engine core**: calendar → graph → capacity → forward/backward pass → T1, plus plan-level equivalents of T2–T4. *(done: 59 tests passing)*
-3. **Effects + replay + snapshots**: T2, T3, T4, HS pass. This is the spec §39 milestone as a test.
+3. **Effects + replay + snapshots + explanation**: T2, T3, T4, HS, CAP, recovery and void all pass through the event log. This is the spec §39 milestone as a test. *(done: 169 tests passing; step 4 below builds on `explainSnapshot`)*
 4. **Attribution + advisories + timeline builder**, with strategy interface.
 5. **Server + SQLite + seed** and the API from §5, tested with the Thriveni seed.
 6. **Multiverse timeline UI**, then Control Room, then Retro view.
