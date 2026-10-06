@@ -207,66 +207,107 @@ Derived from snapshots; there is no `branches` table. **One branch per deviating
 
 ```ts
 interface Branch {
-  moduleId: ModuleId;
+  moduleId: ModuleId;  moduleName: string;
+  isDelivery: boolean;             // this module holds the delivery milestone: it is the project delivery lane
   forkAt: ISODate;                 // asOf of the first snapshot in which the module deviated
-  baselineFinish: ISODate;  currentFinish: ISODate;  currentDelta: WorkDays;
+  baselineFinish: DatedOffset | null;  currentFinish: DatedOffset;  currentDelta: WorkDays;
   status: 'OPEN' | 'MERGED';       // MERGED = back to variance 0 after a recovery
   steps: BranchStep[];
 }
 interface BranchStep {
-  snapshotId: string;  eventId: string;
+  revision: number;  kind: 'EVENT' | 'VOID';  eventId: string;  asOf: ISODate;
   delta: WorkDays;                 // change in this module's variance at this step
-  finishAfter: ISODate;
+  variance: WorkDays;              // the module's total variance after the step
+  finishAfter: DatedOffset;
   origin: 'DIRECT' | 'PROPAGATED'; // DIRECT: the event's effects touch this module's tasks
-  fromModuleIds?: ModuleId[];      // PROPAGATED: modules upstream on the driving chain
+  fromModuleIds: ModuleId[];       // PROPAGATED: the changed modules that explain the move
   deliveryDelta: WorkDays;         // what the same snapshot did to project delivery
   absorbed: boolean;               // delta > 0 but deliveryDelta = 0: absorbed by float
   onCriticalPath: boolean;
+}
+interface Timeline {
+  original: { delivery; modules[]; milestones[] };   // the baseline, never changes
+  current:  { delivery; variance; asOf };
+  branches: Branch[];              // in the order modules first deviated
+  markers:  EventMarker[];         // every event and void, including those that moved nothing
 }
 ```
 
 - **Delivery branch.** The delivery milestone sits in the `PROJECT` module, so the project delivery line is simply that module's branch. A delay in M5 therefore produces an M5 branch (DIRECT) and a delivery branch (PROPAGATED, `fromModuleIds = [M5]`), linked by that field.
 - **Absorbed delay.** A module can slip without moving delivery. It still gets its branch, flagged `absorbed`, so the slip is visible and so is the float that protected the project.
 - **Recovery** (`delta < 0`) bends the branch back toward the original line. At variance 0 it is `MERGED`; if the module deviates again the branch re-opens.
-- **No schedule effect.** An event that adds effort but moves no module's finish creates no branch step. It still shows as an event marker with its effort impact.
-- Per-module variance, step and origin are all computed from stored snapshots plus the driving chain, so nothing extra is persisted.
+- **No schedule effect.** An event that adds effort but moves no module's finish creates no branch step. It still shows as an event marker with its effort impact (`noScheduleEffect`).
+- **Voids** add a `VOID` step to every branch the voided event had moved, naming the withdrawn event.
+- **`fromModuleIds`** looks upstream on the *new* driving chain for delays, and on the *old* one for recoveries. When M5 finishes early and the critical path switches to M3, the delivery gain is still attributed to M5, not to M3, which did not change.
+- Per-module variance, step and origin are all computed from stored snapshots plus the driving chain, so nothing extra is persisted. `buildTimeline(state)` derives it on demand.
 
-### 3.7 Delay attribution (v1, swappable)
+### 3.7 Delay attribution (swappable)
+
+This is the part the owner will tune after trying scenarios, so it has three separate seams: the **strategy** (how days are divided), the **category rules** (how events are grouped), and a **reconciliation check** (no strategy can lose or invent days).
 
 ```ts
 interface AttributionStrategy {
   name: string;
-  attribute(baseline: Plan, events: Event[]): Contribution[];   // [{ eventId, category, days }], must sum to total variance
+  attribute(input: { baseline: Plan; log: LogEntry[]; state: ProjectState }): {
+    contributions: { eventId; days; effortDays }[];
+    interaction: WorkDays;          // days no single event accounts for
+  };
 }
+attributeDelay(state, { strategy?, rules? }) → { strategy, totalVariance, contributions[], interaction, byCategory[] }
 ```
 
-**v1 = `sequential`.** Replay events in recorded order. Event k's contribution is `stepDays(k)`. This telescopes, so contributions sum *exactly* to the final variance. It is simple and auditable. Its weakness is order dependence: if two events overlap on the critical path, whichever came first absorbs the credit or blame.
+`attributeDelay` throws if `Σ contributions + interaction ≠ total variance`, naming the strategy. A strategy under development fails loudly instead of producing a retro that does not add up.
 
-**Planned v2 = `counterfactual`.** Remove each event in turn and replay, then report the marginal days plus an explicit "interaction" remainder. The strategy interface exists so the owner can compare both on test scenarios.
+Both strategies replay only the **active** events (a voided event is skipped entirely), not stored snapshots, so voids never distort the shares.
 
-Roll-up into spec §24 categories uses a configurable table:
+**`sequential` (default).** Event k's contribution is `stepDays(k)`. This telescopes, so contributions sum *exactly* to the total and `interaction` is always 0. Simple and auditable. Its weakness is order dependence: when two events overlap on the critical path, whichever was recorded first takes the credit or blame.
 
-| Condition | Contributor |
-|-----------|-------------|
-| `SCOPE_CHANGE`, `REQUIREMENT_CHANGE` | Scope changes (→ "Late scope discovery" if raised after the module's development started) |
-| `FEEDBACK`, `CLIENT_FEEDBACK` | Late feedback (only if phase is later than the work it concerns) |
-| `RESOURCE_CHANGE`, `TRANSFER_OWNER` cost | Capacity changes |
+**`counterfactual`.** Remove each event in turn, replay, and report how much sooner the project would have finished without it (its marginal). Marginals do not generally add up, because overlapping events hide each other; the shortfall is reported as `interaction`. If other events build on the removed one's tasks, they are removed with it.
+
+Worked example (M5 Dev +1 and M3 Dev +3 land together; M3 sets the pace, total +2):
+
+| | `blocked` (M5 +1) | `m3-slip` (M3 +3) | interaction |
+|---|---|---|---|
+| sequential | +1 | +1 | 0 |
+| counterfactual | 0 (hidden behind M3) | +1 (without it the project is only +1) | +1 |
+
+Neither is "right". They answer different questions, which is why both exist.
+
+**Categories** are a first-match-wins rule list (`DEFAULT_CATEGORY_RULES`), data you can edit or replace. v1 uses the event's `phase` as the signal for "late":
+
+| Event | Category |
+|---|---|
+| `SCOPE_CHANGE`, `REQUIREMENT_CHANGE` | **Late scope discovery** if phase is `DEVELOPMENT` or later, else Scope changes |
+| `FEEDBACK` | **Late feedback** if phase is `INTERNAL_REVIEW` or later, else Feedback |
+| `CLIENT_FEEDBACK` | Client feedback |
+| `RESOURCE_CHANGE`, `OWNERSHIP_TRANSFER` | Capacity changes |
 | `BLOCKER`, `DEPENDENCY_DELAY` | Dependency delays |
 | `REWORK`, `DEFECT` | Rework |
-| `TASK_DELAY` with no explaining event | Estimation / unexplained variance |
+| `TECHNICAL_DECISION` | Technical decisions |
+| `MILESTONE_CHANGE` | Milestone changes |
+| `TASK_DELAY`, `TASK_COMPLETION` | Estimation / unexplained variance |
+| anything else | Other |
 
-The unexplained bucket matters: without it a task that simply overran would be silently dropped, and the contributors would no longer add up to the variance.
+A `TASK_DELAY` that names a `parentEventId` takes its parent's category (a delay that has an explanation on record is not "unexplained"); chains are followed and cycles cannot loop.
+
+The unexplained bucket matters: without it a task that simply overran would be dropped, and the contributors would no longer add up to the variance.
+
+**Known sensitivity.** Because categories come from the event's `type` and `phase`, the same extinguisher change is "Late scope discovery" if recorded as a `SCOPE_CHANGE` during development but only "Feedback" if recorded as `FEEDBACK` during development. The numbers are identical; the label depends on how it was entered. This is deliberate for v1 (the person recording the event knows what it was) but is the first thing to revisit after trying scenarios.
 
 ### 3.8 Advisories (rules, never blockers)
 
-- **Common feature detection** (spec §11): a Feature linked to ≥ N modules (default 2) with no `sharedTaskId` yields an advisory with module count and recommendation.
-- Each advisory is a pure function `(plan) → Finding[]`. Definition of Ready and Feature Impact Assessment (spec §10, §12) will be added the same way after the MVP. The columns to hold them are nullable and reserved.
+- **Common feature detection** (spec §11): a feature used by ≥ N modules (default 2) with no shared implementation task yields an advisory with the module count and a recommendation. A feature is *used by* a module if it is listed against it (`Feature.moduleIds`) or one of the module's tasks implements it (`Task.featureId`). Only `DELIVERABLE` modules count, because shared and project modules are where shared work lives, not consumers of it. A feature has a shared implementation when `Feature.sharedTaskId` names an existing task.
+- On the Thriveni seed exactly one advisory fires: *"Common feature detected: Extinguisher is used by 7 modules but has no shared implementation task."* Localization, evaluation and the menu each have a shared task and are not flagged.
+- Each advisory is a pure function `(plan) → Advisory[]`; `Plan.features` is optional and never affects the schedule. Definition of Ready and Feature Impact Assessment (spec §10, §12) will be added the same way after the MVP. The columns to hold them are nullable and reserved.
 
 ### 3.9 Derived views
 
-- **Progress %** = completed effort ÷ total current effort (effort-weighted, not task-count).
-- **Forecast drift** = delivery forecast across snapshots over time.
-- **First breach** = first snapshot where forecast > baseline (spec §20 "first detectable risk"). Cheap to add because every snapshot is stored.
+All computed from stored snapshots; nothing extra is persisted.
+
+- **Forecast drift** (`forecastDrift`) = the delivery forecast at every revision.
+- **Milestone history** (`milestoneHistory`) = one milestone's baseline and forecast at every revision (spec §20).
+- **First breach** (`firstBreach`) = first snapshot where forecast > baseline. This is *recognised* schedule impact. The spec §20 metric "time between first detectable risk and recognized impact" needs a notion of *detectable* risk (for example, float to target shrinking to zero) that is not designed yet.
+- **Progress %** = completed effort ÷ total current effort (effort-weighted, not task-count). Not built yet; part of the Control Room.
 
 ---
 
@@ -384,8 +425,8 @@ Pure-function tests in `packages/engine`, run by Vitest, before any server or UI
 6. **Progress**: completed / in-progress tasks use actuals and never move earlier than `asOf`.
 7. **Replay**: applying effects in order is deterministic; voided events are skipped.
 8. **Snapshots**: append-only, forecast history preserved, `stepDays` telescopes to total variance.
-9. **Attribution**: contributions sum to variance for both strategies on every scenario (counterfactual includes the interaction remainder).
-10. **Advisory**: Extinguisher with 7 modules and no shared task is flagged; adding a shared task clears it.
+9. **Attribution**: contributions plus interaction equal the variance for both strategies on ten scenarios, including voids, recovery and capacity cuts; a custom strategy that does not add up is rejected.
+10. **Advisory**: Extinguisher with 7 modules and no shared task is flagged; adding a shared task clears it; thresholds, task-derived links and shared/project modules are covered.
 11. **Branches**: one per deviating module; DIRECT vs PROPAGATED origin and `fromModuleIds`; `absorbed` flag (T2); critical-path switch (T4); recovery and `MERGED`; no branch for a module that never deviates. *(the explanation data for these is tested in step 3; the branch builder itself is step 4)*
 12. **Carry-forward**: jumping to, or stepping through, any status date with no other change reproduces the baseline forecast exactly. Checked on Thriveni, Thriveni with a mid-project Dev cut, and fractional estimates with a 2/3 capacity factor (the worst case for rounding drift).
 
@@ -412,6 +453,6 @@ Follows spec §30. Each step ends in something testable.
 1. **Scaffold** the workspace, TypeScript, Vitest, typecheck. *(done)*
 2. **Engine core**: calendar → graph → capacity → forward/backward pass → T1, plus plan-level equivalents of T2–T4. *(done: 59 tests passing)*
 3. **Effects + replay + snapshots + explanation**: T2, T3, T4, HS, CAP, recovery and void all pass through the event log. This is the spec §39 milestone as a test. *(done: 169 tests passing; step 4 below builds on `explainSnapshot`)*
-4. **Attribution + advisories + timeline builder**, with strategy interface.
+4. **Attribution + advisories + timeline builder**, with strategy interface. *(done: 242 tests passing)*
 5. **Server + SQLite + seed** and the API from §5, tested with the Thriveni seed.
 6. **Multiverse timeline UI**, then Control Room, then Retro view.

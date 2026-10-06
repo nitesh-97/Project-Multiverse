@@ -1,5 +1,6 @@
 import type { Schedule, ScheduledTask } from './schedule';
 import type { ISODate, ModuleId, Plan, TaskId, WorkDays } from './types';
+import { tidy } from './util';
 
 export const ENGINE_VERSION = '0.1.0';
 
@@ -69,12 +70,6 @@ export interface SnapshotInput {
   baselineSchedule: Schedule;
   previous: ForecastSnapshot | null;
 }
-
-/**
- * Variance and step are reported to a millionth of a working day (under 0.1 s). Anything smaller is numerical noise
- * from carrying forecasts forward, and must not read as a real change: a step of 1e-9 days would create a phantom branch.
- */
-const tidy = (x: number): number => Math.round(x * 1e6) / 1e6 + 0;
 
 export function buildSnapshot(input: SnapshotInput): ForecastSnapshot {
   const { schedule, baselineSchedule: base, previous } = input;

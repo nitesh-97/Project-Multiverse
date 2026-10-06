@@ -66,7 +66,20 @@ export interface Task {
   startNoEarlierThan?: ISODate;
   /** Current owner; informational only, the schedule does not use it. */
   ownerId?: string;
+  /** The feature this task implements or integrates, if any. */
+  featureId?: string;
   progress?: TaskProgress;
+}
+
+/**
+ * A capability that modules use (extinguisher, localization, evaluation, menu UI). A feature used by several
+ * modules is a candidate for one shared implementation, which `sharedTaskId` names once it has been planned.
+ */
+export interface Feature {
+  id: string;
+  name: string;
+  moduleIds: ModuleId[];
+  sharedTaskId?: TaskId;
 }
 
 /** Finish-to-start only for the MVP. */
@@ -83,6 +96,8 @@ export interface Plan {
   modules: Module[];
   tasks: Task[];
   dependencies: Dependency[];
+  /** Optional; does not affect the schedule. Used by advisories. */
+  features?: Feature[];
   /** The milestone whose finish is the project delivery date. Must have no successors. */
   deliveryTaskId: TaskId;
 }

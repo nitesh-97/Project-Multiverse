@@ -1,4 +1,4 @@
-import type { Dependency, Module, Plan, Task } from '../types';
+import type { Dependency, Feature, Module, Plan, Task } from '../types';
 
 /**
  * The Thriveni reference project from DESIGN.md §6.
@@ -72,6 +72,16 @@ export function buildThriveni(): Plan {
   after('proj.qa', 'proj.beta');
   after('proj.beta', 'proj.delivery');
 
+  // Every module needs all four. Localization, evaluation and the menu have a shared task; the extinguisher
+  // deliberately does not, which is what the common-feature advisory should catch (spec §28 step 3).
+  const allModules = MODULE_DURATIONS.map((_, i) => `m${i + 1}`);
+  const features: Feature[] = [
+    { id: 'extinguisher', name: 'Extinguisher', moduleIds: allModules },
+    { id: 'localization', name: 'Localization', moduleIds: allModules, sharedTaskId: 'shared.loc' },
+    { id: 'evaluation', name: 'Evaluation system', moduleIds: allModules, sharedTaskId: 'shared.eval' },
+    { id: 'menu-ui', name: 'Menu UI', moduleIds: allModules, sharedTaskId: 'shared.menu' },
+  ];
+
   const startDate = '2026-10-05';
   return {
     calendar: { startDate, weekendDays: [0, 6], holidays: [] },
@@ -92,6 +102,7 @@ export function buildThriveni(): Plan {
     modules,
     tasks,
     dependencies,
+    features,
     deliveryTaskId: 'proj.delivery',
   };
 }

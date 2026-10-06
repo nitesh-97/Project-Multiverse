@@ -63,6 +63,22 @@ export function validatePlan(plan: Plan): void {
     if (!(first.headcount > 0)) issues.push(`Team ${teamId} must have a planned (earliest) headcount above 0`);
   }
 
+  const features = plan.features ?? [];
+  const featureDupes = duplicates(features.map((f) => f.id));
+  if (featureDupes.length > 0) issues.push(`Duplicate feature ids: ${featureDupes.join(', ')}`);
+  const featureIds = new Set(features.map((f) => f.id));
+  for (const f of features) {
+    for (const m of f.moduleIds) if (!moduleIds.has(m)) issues.push(`Feature ${f.id} refers to unknown module ${m}`);
+    if (f.sharedTaskId !== undefined && !taskById.has(f.sharedTaskId)) {
+      issues.push(`Feature ${f.id} refers to unknown shared task ${f.sharedTaskId}`);
+    }
+  }
+  for (const t of plan.tasks) {
+    if (t.featureId !== undefined && !featureIds.has(t.featureId)) {
+      issues.push(`Task ${t.id} refers to unknown feature ${t.featureId}`);
+    }
+  }
+
   const delivery = taskById.get(plan.deliveryTaskId);
   if (!delivery) {
     issues.push(`Delivery task ${plan.deliveryTaskId} does not exist`);
