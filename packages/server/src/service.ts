@@ -1,9 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import {
+  DEFAULT_PHASES,
   EffectError,
   PlanError,
   attributeDelay,
+  buildControlRoom,
   buildHistory,
+  buildMilestones,
+  buildModuleView,
+  buildRetro,
   buildTimeline,
   counterfactualStrategy,
   explainSnapshot,
@@ -21,15 +26,22 @@ import {
   voidEvent as engineVoid,
 } from '@multiverse/engine';
 import type {
-  Advisory,
   Attribution,
   ChangeExplanation,
+  ControlRoomView,
+  CurrentTask,
   Effect,
   Event,
   ForecastSnapshot,
+  ModuleView,
+  PhaseModel,
   Plan,
   PlanEdit,
+  ProjectAdvisory,
   ProjectState,
+  ProjectTimelineView,
+  RetroView,
+  TargetStatus,
   VoidEntry,
 } from '@multiverse/engine';
 import { transaction } from './db/database';
@@ -56,13 +68,6 @@ export interface BlueprintValidation {
   issues: string[];
 }
 
-/** The forecast against the date promised to the client. */
-export interface TargetStatus {
-  date: string;
-  /** Working days to spare (positive) or late (negative) against that date. */
-  daysToSpare: number;
-}
-
 /** A snapshot without the per-task detail: enough to chart a forecast. */
 export interface SnapshotSummary {
   revision: number;
@@ -76,11 +81,6 @@ export interface SnapshotSummary {
   stepDays: number;
   effortImpact: number;
   engineVersion: string;
-}
-
-/** An engine advisory, or one only the server can raise because it needs to know which modules are locked. */
-export interface ProjectAdvisory extends Omit<Advisory, 'rule'> {
-  rule: Advisory['rule'] | 'MODULE_STARTED_NOT_LOCKED';
 }
 
 /**
@@ -181,6 +181,7 @@ export class ProjectService {
     targetDate?: string | undefined;
     weekendDays: number[];
     holidays: string[];
+    phases?: PhaseModel | undefined;
   }): ProjectRecord {
     return transaction(this.db, () => {
       const id = input.id ?? `${input.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'project'}-${randomUUID().slice(0, 6)}`;
@@ -195,6 +196,7 @@ export class ProjectService {
         planRevision: 0,
         startedAt: null,
         createdAt: this.now(),
+        phases: input.phases ?? DEFAULT_PHASES,
       });
       return this.requireProject(id);
     });
@@ -617,8 +619,41 @@ export class ProjectService {
     return { snapshot, explanation: revision > 0 ? explainSnapshot(state.snapshots[revision - 1] as ForecastSnapshot, snapshot) : null };
   }
 
-  timeline(projectId: string) {
-    return buildTimeline(this.stored(projectId).state);
+  /** The project view: the Multiverse timeline plus the milestone dots on it. */
+  timeline(projectId: string): ProjectTimelineView {
+    const { state } = this.stored(projectId);
+    const flaggedTaskIds = this.store.listMilestoneFlags(projectId);
+    return { ...buildTimeline(state), milestones: buildMilestones(state, { flaggedTaskIds }), flaggedTaskIds };
+  }
+
+  /** One module on its own: each task as a dot, and a branch for each task that deviated. */
+  moduleTimeline(projectId: string, moduleId: string): ModuleView {
+    const { state } = this.stored(projectId);
+    if (!state.plan.modules.some((m) => m.id === moduleId)) throw notFound('Module', moduleId);
+    return buildModuleView(state, moduleId);
+  }
+
+  milestoneFlags(projectId: string): string[] {
+    this.requireProject(projectId);
+    return this.store.listMilestoneFlags(projectId);
+  }
+
+  /**
+   * Flags a task as a project milestone, or takes the flag off. It only changes which dots the project view shows, so it
+   * is allowed at any time, before or after the project starts. The task must exist in the plan as it stands.
+   */
+  setMilestoneFlag(projectId: string, taskId: string, flagged: boolean, by?: string): string[] {
+    return transaction(this.db, () => {
+      const project = this.requireProject(projectId);
+      if (flagged) {
+        const known = project.startedAt !== null ? this.replay(projectId).plan.tasks.map((t) => t.id) : this.store.listTasks(projectId).map((t) => t.id);
+        if (!known.includes(taskId)) throw notFound('Task', taskId);
+        this.store.addMilestoneFlag(projectId, taskId, this.now(), by ?? null);
+      } else {
+        this.store.removeMilestoneFlag(projectId, taskId);
+      }
+      return this.store.listMilestoneFlags(projectId);
+    });
   }
 
   history(projectId: string) {
@@ -640,7 +675,10 @@ export class ProjectService {
    */
   advisories(projectId: string, commonFeatureMinModules?: number): ProjectAdvisory[] {
     this.requireStarted(projectId);
-    const state = this.replay(projectId);
+    return this.advisoriesOf(projectId, this.replay(projectId), commonFeatureMinModules);
+  }
+
+  private advisoriesOf(projectId: string, state: ProjectState, commonFeatureMinModules?: number): ProjectAdvisory[] {
     const advisories: ProjectAdvisory[] = findAdvisories(state.plan, commonFeatureMinModules === undefined ? {} : { commonFeatureMinModules });
 
     for (const module of this.store.listModules(projectId)) {
@@ -672,6 +710,64 @@ export class ProjectService {
       sequential: attributeDelay(state, { strategy: STRATEGIES.sequential }),
       counterfactual: attributeDelay(state, { strategy: STRATEGIES.counterfactual }),
     };
+  }
+
+  /**
+   * The management view: where the project stands against the plan and against the client's date, what is setting
+   * the pace, what is likely to be next, and what needs a person's attention.
+   */
+  controlRoom(projectId: string): ControlRoomView {
+    const { project, state } = this.stored(projectId);
+    const room = buildControlRoom(state);
+    const lockedAt = new Map(this.store.listModules(projectId).map((m) => [m.id, m.lockedAt]));
+    return {
+      ...room,
+      modules: room.modules.map((m) => ({ ...m, locked: lockedAt.get(m.moduleId) != null })),
+      target: this.targetOf(project, last(state.snapshots)),
+      contributors: attributeDelay(state, { strategy: STRATEGIES.sequential }),
+      advisories: this.advisoriesOf(projectId, state),
+    };
+  }
+
+  /** The retrospective: planned against actual, the delay shared out both ways, and what the project learned. */
+  retro(projectId: string): RetroView {
+    const { project, state } = this.stored(projectId);
+    return { ...buildRetro(state), target: this.targetOf(project, last(state.snapshots)) };
+  }
+
+  /**
+   * The plan as it stands now, task by task, with where each one is in the forecast. Unlike the stored blueprint it
+   * includes work added by events and plan edits, which is what a person picking a task needs to see.
+   */
+  currentTasks(projectId: string): CurrentTask[] {
+    const { state } = this.stored(projectId);
+    const original = new Set(state.origin.tasks.map((t) => t.id));
+    const moduleLocked = new Map(this.store.listModules(projectId).map((m) => [m.id, m.lockedAt != null]));
+    return state.plan.tasks.flatMap((t) => {
+      const s = state.schedule.tasks[t.id];
+      if (!s) return [];
+      return [
+        {
+          id: t.id,
+          name: t.name,
+          moduleId: t.moduleId,
+          teamId: t.teamId,
+          kind: t.kind,
+          estimate: t.estimate,
+          ...(t.featureId !== undefined ? { featureId: t.featureId } : {}),
+          ...(t.ownerId !== undefined ? { ownerId: t.ownerId } : {}),
+          state: s.state,
+          startDate: s.startDate,
+          finishDate: s.finishDate,
+          remainingEffort: s.remainingEffort,
+          totalFloat: s.totalFloat,
+          critical: s.critical,
+          assumed: t.progress?.assumed === true,
+          added: !original.has(t.id),
+          moduleLocked: moduleLocked.get(t.moduleId) === true,
+        },
+      ];
+    });
   }
 
   /** The baseline plan as the engine sees it, for callers that want to run their own what-ifs. */

@@ -22,6 +22,32 @@ export function registerViewRoutes(app: FastifyInstance, svc: ProjectService): v
   /** The Multiverse view: the original line plus one branch per deviating module. */
   app.get('/projects/:id/timeline', async (req) => svc.timeline(params<{ id: string }>(req).id));
 
+  /** One module on its own: each task as a dot, and a branch for each task that has moved from its plan. */
+  app.get('/projects/:id/modules/:moduleId/timeline', async (req) => {
+    const { id, moduleId } = params<{ id: string; moduleId: string }>(req);
+    return svc.moduleTimeline(id, moduleId);
+  });
+
+  /** Which tasks the project manager flagged as project milestones (extra dots on the project view). */
+  app.get('/projects/:id/milestone-flags', async (req) => svc.milestoneFlags(params<{ id: string }>(req).id));
+  app.put('/projects/:id/milestone-flags/:taskId', async (req) => {
+    const { id, taskId } = params<{ id: string; taskId: string }>(req);
+    return svc.setMilestoneFlag(id, taskId, true);
+  });
+  app.delete('/projects/:id/milestone-flags/:taskId', async (req) => {
+    const { id, taskId } = params<{ id: string; taskId: string }>(req);
+    return svc.setMilestoneFlag(id, taskId, false);
+  });
+
+  /** The management view: status against the plan and the client date, bottleneck, watch list, warnings. */
+  app.get('/projects/:id/control-room', async (req) => svc.controlRoom(params<{ id: string }>(req).id));
+
+  /** The retrospective: planned against actual, contributors both ways, feedback timing, observations. */
+  app.get('/projects/:id/retro', async (req) => svc.retro(params<{ id: string }>(req).id));
+
+  /** The plan as it stands now, including work added after the project started, with each task's forecast state. */
+  app.get('/projects/:id/current-tasks', async (req) => svc.currentTasks(params<{ id: string }>(req).id));
+
   /** Delivery forecast drift and the first snapshot that was later than the original date. */
   app.get('/projects/:id/history', async (req) => svc.history(params<{ id: string }>(req).id));
 

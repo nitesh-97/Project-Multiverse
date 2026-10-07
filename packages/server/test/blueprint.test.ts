@@ -1,4 +1,4 @@
-import { buildThriveni } from '@multiverse/engine';
+import { DEFAULT_PHASES, buildThriveni } from '@multiverse/engine';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadBlueprint } from '../src/seed';
 import { makeApp, makeSeededApp, P } from './helpers';
@@ -291,6 +291,7 @@ describe('loading a blueprint from code', () => {
       ...p,
       capacity: [...p.capacity].sort((a, b) => a.teamId.localeCompare(b.teamId)),
     });
-    expect(byTeam(app.service.plan('thriveni'))).toEqual(byTeam(buildThriveni()));
+    // The project was made through the API without phases of its own, so it has the generic starting set.
+    expect(byTeam(app.service.plan('thriveni'))).toEqual(byTeam({ ...buildThriveni(), phases: DEFAULT_PHASES }));
   });
 });

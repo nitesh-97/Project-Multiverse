@@ -15,6 +15,7 @@
     "tsx": "^4.23.15"
   },
   "dependencies": {
+    "@fastify/static": "^10.1.5",
     "@multiverse/engine": "*",
     "fastify": "^5.12.5",
     "zod": "^4.6.5"

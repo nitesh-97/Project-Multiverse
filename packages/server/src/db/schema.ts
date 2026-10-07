@@ -53,7 +53,9 @@ CREATE TABLE IF NOT EXISTS projects (
   delivery_task_id TEXT,
   plan_revision    INTEGER NOT NULL DEFAULT 0,
   started_at       TEXT,
-  created_at       TEXT NOT NULL
+  created_at       TEXT NOT NULL,
+  -- The project's own phases (JSON). NULL on projects made before phases were the project's own: the legacy list.
+  phases           TEXT
 );
 
 CREATE TABLE IF NOT EXISTS teams (
@@ -116,6 +118,17 @@ CREATE TABLE IF NOT EXISTS features (
   name           TEXT NOT NULL,
   shared_task_id TEXT,
   PRIMARY KEY (project_id, id)
+);
+
+-- Tasks the project manager flagged as project milestones: which dots the project view shows. A view setting, not part
+-- of the plan, so it can change at any time and is not frozen when the project starts. The id can be a task that
+-- only exists in the log (work added by an event), so it is not a foreign key.
+CREATE TABLE IF NOT EXISTS milestone_flags (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  task_id    TEXT NOT NULL,
+  flagged_at TEXT NOT NULL,
+  flagged_by TEXT,
+  PRIMARY KEY (project_id, task_id)
 );
 
 CREATE TABLE IF NOT EXISTS module_features (
@@ -244,6 +257,10 @@ BEGIN SELECT RAISE(ABORT, 'LOCKED: the successor task is in a locked module; rec
 CREATE TRIGGER IF NOT EXISTS projects_baseline_frozen BEFORE UPDATE OF start_date, weekend_days, holidays, delivery_task_id ON projects
 WHEN OLD.started_at IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'LOCKED: the project has started, so its calendar and delivery milestone can no longer change'); END;
+
+CREATE TRIGGER IF NOT EXISTS projects_phases_frozen BEFORE UPDATE OF phases ON projects
+WHEN OLD.started_at IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'LOCKED: the project has started, so its phases can no longer change; events already refer to them'); END;
 
 CREATE TRIGGER IF NOT EXISTS projects_started_once BEFORE UPDATE OF started_at ON projects
 WHEN OLD.started_at IS NOT NULL

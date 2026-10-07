@@ -1,10 +1,10 @@
 import { EffectError } from './errors';
-import { PHASES } from './events';
-import type { Event, LogEntry, Phase } from './events';
+import { LEGACY_PHASES, phaseIndex, phaseModelOf } from './events';
+import type { Event, LogEntry } from './events';
 import { buildHistory } from './history';
 import type { ActiveEntry, ProjectState } from './history';
 import type { ForecastSnapshot } from './snapshot';
-import type { Plan, WorkDays } from './types';
+import type { PhaseModel, Plan, WorkDays } from './types';
 import { tidy } from './util';
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -116,10 +116,6 @@ export const counterfactualStrategy: AttributionStrategy = {
 // Categories: how events are grouped into the contributors the retrospective shows (spec §4, §24).
 // ---------------------------------------------------------------------------------------------------------------
 
-export const PHASE_ORDER: readonly Phase[] = PHASES;
-
-const atOrAfter = (phase: Phase, from: Phase): boolean => PHASE_ORDER.indexOf(phase) >= PHASE_ORDER.indexOf(from);
-
 /** The first rule that matches wins. Edit or replace this list to change how events are grouped. */
 export interface CategoryRule {
   category: string;
@@ -132,13 +128,16 @@ export const FALLBACK_CATEGORY = 'Other';
 export const PLANNING = 'Planning changes';
 
 /**
- * v1 rules, using the event's `phase` as the signal for "late". Scope raised once development has started is late
- * discovery; feedback raised after development has finished is late feedback.
+ * v1 rules, using the event's `phase` as the signal for "late". Scope raised once building has started is late
+ * discovery; feedback raised after building has finished is late feedback. "Started" and "finished" are the
+ * project's own phases (`PhaseModel`), so the rules fit any kind of project.
  */
-export const DEFAULT_CATEGORY_RULES: readonly CategoryRule[] = [
-  { category: 'Late scope discovery', matches: (e) => (e.type === 'SCOPE_CHANGE' || e.type === 'REQUIREMENT_CHANGE') && atOrAfter(e.phase, 'DEVELOPMENT') },
+export function categoryRules(model: PhaseModel): readonly CategoryRule[] {
+  const atOrAfter = (phase: string, from: string): boolean => phaseIndex(model, phase) >= phaseIndex(model, from);
+  return [
+  { category: 'Late scope discovery', matches: (e) => (e.type === 'SCOPE_CHANGE' || e.type === 'REQUIREMENT_CHANGE') && atOrAfter(e.phase, model.buildStarts) },
   { category: 'Scope changes', matches: (e) => e.type === 'SCOPE_CHANGE' || e.type === 'REQUIREMENT_CHANGE' },
-  { category: 'Late feedback', matches: (e) => e.type === 'FEEDBACK' && atOrAfter(e.phase, 'INTERNAL_REVIEW') },
+  { category: 'Late feedback', matches: (e) => e.type === 'FEEDBACK' && atOrAfter(e.phase, model.afterBuild) },
   { category: 'Feedback', matches: (e) => e.type === 'FEEDBACK' },
   { category: 'Client feedback', matches: (e) => e.type === 'CLIENT_FEEDBACK' },
   { category: 'Capacity changes', matches: (e) => e.type === 'RESOURCE_CHANGE' || e.type === 'OWNERSHIP_TRANSFER' },
@@ -147,7 +146,11 @@ export const DEFAULT_CATEGORY_RULES: readonly CategoryRule[] = [
   { category: 'Technical decisions', matches: (e) => e.type === 'TECHNICAL_DECISION' },
   { category: 'Milestone changes', matches: (e) => e.type === 'MILESTONE_CHANGE' },
   { category: UNEXPLAINED, matches: (e) => e.type === 'TASK_DELAY' || e.type === 'TASK_COMPLETION' },
-];
+  ];
+}
+
+/** The rules for a project that uses the legacy phases. `attributeDelay` uses the project's own. */
+export const DEFAULT_CATEGORY_RULES: readonly CategoryRule[] = categoryRules(LEGACY_PHASES);
 
 /**
  * A task that slipped for a reason already on record is not "unexplained": a TASK_DELAY that names a parent event
@@ -208,7 +211,7 @@ export interface AttributionOptions {
  */
 export function attributeDelay(state: ProjectState, options: AttributionOptions = {}): Attribution {
   const strategy = options.strategy ?? sequentialStrategy;
-  const rules = options.rules ?? DEFAULT_CATEGORY_RULES;
+  const rules = options.rules ?? categoryRules(phaseModelOf(state.plan));
   const totalVariance = finalSnapshot(state).variance;
 
   const { contributions: raw, interaction } = strategy.attribute({ origin: state.origin, log: state.log, state });

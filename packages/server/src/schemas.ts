@@ -1,4 +1,4 @@
-import { EVENT_TYPES, PHASES, isISODate } from '@multiverse/engine';
+import { EVENT_TYPES, isISODate, validatePhaseModel } from '@multiverse/engine';
 import type { Effect } from '@multiverse/engine';
 import { z } from 'zod';
 
@@ -12,6 +12,17 @@ const text = z.string().trim().min(1);
 
 // ---------------------------------------------------------------------------------------------- projects
 
+/** A project's own phases, in order, with the two the retrospective needs. Every problem is reported by name. */
+export const phaseModelBody = z
+  .strictObject({
+    phases: z.array(z.strictObject({ id: z.string().trim().min(1).max(40), name: text.max(60) })).max(30),
+    buildStarts: z.string(),
+    afterBuild: z.string(),
+  })
+  .superRefine((model, ctx) => {
+    for (const message of validatePhaseModel(model)) ctx.addIssue({ code: 'custom', message });
+  });
+
 export const projectCreate = z.strictObject({
   id: id.optional(),
   name: text,
@@ -19,6 +30,8 @@ export const projectCreate = z.strictObject({
   targetDate: date.optional(),
   weekendDays: z.array(z.number().int().min(0).max(6)).max(6).default([0, 6]),
   holidays: z.array(date).default([]),
+  /** Left out, the project gets a generic starting set (`DEFAULT_PHASES`) that it can change until it starts. */
+  phases: phaseModelBody.optional(),
 });
 
 export const projectPatch = z.strictObject({
@@ -27,6 +40,7 @@ export const projectPatch = z.strictObject({
   startDate: date.optional(),
   weekendDays: z.array(z.number().int().min(0).max(6)).max(6).optional(),
   holidays: z.array(date).optional(),
+  phases: phaseModelBody.optional(),
 });
 
 export const deliveryBody = z.strictObject({ taskId: id });
@@ -142,7 +156,8 @@ export const eventBody = z.strictObject({
   category: text.default('General'),
   title: text,
   description: z.string().default(''),
-  phase: z.enum(PHASES),
+  /** One of the project's own phases; the engine refuses any other, naming the ones there are. */
+  phase: z.string().trim().min(1),
   moduleId: id.optional(),
   taskId: id.optional(),
   createdBy: text,

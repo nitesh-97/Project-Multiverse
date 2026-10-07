@@ -1,3 +1,4 @@
+import fastifyStatic from '@fastify/static';
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
 import type { Db } from './db/database';
@@ -12,7 +13,21 @@ import type { ServiceOptions } from './service';
 export interface AppOptions extends ServiceOptions {
   db: Db;
   logger?: boolean;
+  /** A built web app (packages/web/dist) to serve at `/`. Without it only the API is served. */
+  webRoot?: string | undefined;
 }
+
+/** The page loads its own script and styles and talks only to this server. */
+const PAGE_POLICY = [
+  "default-src 'self'",
+  "img-src 'self' data:",
+  "style-src 'self' 'unsafe-inline'",
+  "script-src 'self'",
+  "connect-src 'self'",
+  "base-uri 'none'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join("; ");
 
 export interface App {
   server: FastifyInstance;
@@ -43,6 +58,24 @@ export function buildApp(options: AppOptions): App {
   registerBlueprintRoutes(server, service);
   registerEventRoutes(server, service);
   registerViewRoutes(server, service);
+
+  if (options.webRoot) {
+    // Registered last, and only for what the API does not answer: a path that is neither a file nor a route is still
+    // the API's JSON 404.
+    void server.register(fastifyStatic, {
+      root: options.webRoot,
+      cacheControl: false,
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith('.html')) {
+          res.header('Content-Security-Policy', PAGE_POLICY);
+          res.header('Cache-Control', 'no-cache');
+        } else {
+          // Built file names carry a hash of their contents, so they can be kept for good.
+          res.header('Cache-Control', 'public, max-age=31536000, immutable');
+        }
+      },
+    });
+  }
 
   return { server, service };
 }

@@ -17,6 +17,31 @@ export { buildHistory, recordEvent, recordPlanEdit, startProject, voidEvent } fr
 export type { ActiveEntry, ProjectState } from './history';
 export { explainSnapshot, previewEvent, previewPlanEdit } from './explain';
 export type { ChangeExplanation, ModuleChange, TaskChange } from './explain';
+export { buildMilestones, buildModuleView } from './views';
+export type { DotKind, MilestoneDot, MilestoneOptions, ModuleView, TaskBranch, TaskBranchStep, TaskDot } from './views';
+export { buildControlRoom } from './controlroom';
+export type { ControlRoom, ControlRoomOptions, ModuleStatus, ProgressFigures, WatchTask } from './controlroom';
+export { buildRetro } from './retro';
+export type { FeedbackStats, PhaseShare, Retro } from './retro';
+export type {
+  ControlRoomView,
+  CurrentTask,
+  EventLogItem,
+  EventPreview,
+  ForecastView,
+  ModuleInfo,
+  PlanEditLogItem,
+  PlanEditPreview,
+  ProjectAdvisory,
+  ProjectTimelineView,
+  ProjectDetail,
+  ProjectInfo,
+  RecordedEventView,
+  RecordedPlanEditView,
+  RetroView,
+  SnapshotView,
+  TargetStatus,
+} from './contract';
 export { findAdvisories } from './advisories';
 export type { Advisory, AdvisoryOptions, AdvisoryRule } from './advisories';
 export { buildTimeline, firstBreach, forecastDrift, milestoneHistory } from './timeline';
@@ -24,7 +49,7 @@ export type { Branch, BranchStep, Breach, DriftPoint, EventMarker, MilestonePoin
 export {
   DEFAULT_CATEGORY_RULES,
   FALLBACK_CATEGORY,
-  PHASE_ORDER,
+  categoryRules,
   PLANNING,
   UNEXPLAINED,
   attributeDelay,
@@ -44,3 +69,4 @@ export type {
   StrategyResult,
 } from './attribution';
 export { buildThriveni } from './fixtures/thriveni';
+export { COMMUNITY_CENTRE_PHASES, buildCommunityCentre } from './fixtures/communityCentre';

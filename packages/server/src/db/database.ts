@@ -11,8 +11,19 @@ export function openDatabase(path: string): Db {
   const db = new DatabaseSync(path);
   db.exec('PRAGMA foreign_keys = ON');
   if (path !== ':memory:') db.exec('PRAGMA journal_mode = WAL');
+  upgrade(db);
   db.exec(SCHEMA);
   return db;
+}
+
+/**
+ * Brings a database made by an earlier version up to date, before the schema is applied (the schema's triggers refer to
+ * the new columns). Only ever adds: nothing is rewritten, so existing data is untouched.
+ */
+function upgrade(db: Db): void {
+  const columns = (table: string): string[] => (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name);
+  const projects = columns('projects');
+  if (projects.length > 0 && !projects.includes('phases')) db.exec('ALTER TABLE projects ADD COLUMN phases TEXT');
 }
 
 const depth = new WeakMap<Db, number>();

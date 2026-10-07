@@ -41,7 +41,7 @@ project-multiverse/
 │  ├─ engine/      pure TypeScript, NO I/O, NO Date.now(), NO database. All the intelligence lives here.
 │  │                Also holds the Thriveni reference fixture (src/fixtures), used by tests, seed and demo.
 │  ├─ server/      Fastify API + SQLite persistence + seed scripts. Thin: loads data, calls engine, stores results.
-│  └─ web/         React + Vite. Built last (Phase 4+).
+│  └─ web/         React + Vite. Four screens over the API (§10). Hand-built SVG charts, no chart library.
 └─ DESIGN.md
 ```
 
@@ -84,7 +84,7 @@ interface Event {
                                    // RESOURCE_CHANGE | REWORK | DEFECT | TECHNICAL_DECISION | OWNERSHIP_TRANSFER |
                                    // CLIENT_FEEDBACK | TASK_DELAY | TASK_COMPLETION | MILESTONE_CHANGE
   category: string; title: string; description: string;
-  phase: Phase;                    // PLANNING | STORYBOARD | ART | DEVELOPMENT | INTERNAL_REVIEW | ALPHA | CLIENT_REVIEW | QA | BETA | POST_DELIVERY
+  phase: Phase;                    // one of the project's own phases (§2.4): "which phase was the project in when this came up?"
   createdBy: string; sourceTeamId?: string; affectedTeamId?: string; affectedOwnerId?: string;
   occurredAt: ISODate;             // when it happened in the real world
   asOf: ISODate;                   // status date (end of that working day) used for the forecast it triggers; clamped >= previous asOf
@@ -135,6 +135,14 @@ Rules the engine enforces (each failure is an `EffectError` naming the event and
 - **Back-dated events** are allowed. They keep their true `occurredAt`. The snapshot's `asOf` is clamped so it never goes earlier than the previous snapshot's.
 - **Ownership** is a separate append-only table. An `OWNERSHIP_TRANSFER` event writes a row and may add context-transfer effort.
 - **No individual metrics.** There are no per-person delay or efficiency views anywhere (spec §5.2, §36). Ownership history is for traceability only.
+
+### 2.4 Phases belong to the project
+
+The tool is for every kind of project, so the list of phases an event can be "found in" is the project's own (`Plan.phases`, a `PhaseModel`): an ordered list of `{ id, name }`, plus the two the retrospective needs to know about: the phase where **building starts** (scope found from here on is *late discovery*) and the **first phase after building** (feedback from here on arrived *after development*). A game has storyboard, art and development; a building has brief, design, construction and inspection.
+
+- **Defaults.** A new project gets a generic set (`DEFAULT_PHASES`: Planning, Design, Build, Review, Client acceptance, Testing, Release, After delivery) unless it brings its own at creation. A project that has none stored (made before phases were the project's own) is taken to have `LEGACY_PHASES`, the Thriveni list, so everything already recorded keeps its meaning.
+- **Checked.** `validatePhaseModel` reports every problem at once: at least two phases, unique ids without spaces, names, and "after building" coming after "building starts". An event naming a phase the project does not have is refused (`EVENT_REJECTED`), listing the ones it does.
+- **Frozen at the start.** Phases can be set at creation and changed until the project starts. After that they are fixed, because events already refer to them.
 
 ---
 
@@ -252,6 +260,26 @@ interface Timeline {
 - **`fromModuleIds`** looks upstream on the *new* driving chain for delays, and on the *old* one for recoveries. When M5 finishes early and the critical path switches to M3, the delivery gain is still attributed to M5, not to M3, which did not change.
 - Per-module variance, step and origin are all computed from stored snapshots plus the driving chain, so nothing extra is persisted. `buildTimeline(state)` derives it on demand.
 
+### 3.6b The two levels: project view and module view
+
+The Multiverse timeline has two levels, and the branching rule is the same at both: a deviation from the original plan is a new branch. Both are derived from the stored snapshots (`buildMilestones`, `buildModuleView`), so nothing extra is persisted except which tasks the project manager flagged.
+
+**The project view** is the whole project as dots on the original line:
+
+| Dot | Where | Opens |
+|---|---|---|
+| **Module start** (`MODULE_START`) | the earliest start of any of the module's tasks, drawn as the left edge of that day | the module's own view |
+| **Module finish** (`MODULE_FINISH`) | the module's last task; if that is a milestone (an alpha, a delivery) the dot takes its name | |
+| **Milestone** (`MILESTONE`) | a milestone task inside a module, or **any task the project manager flagged** | |
+
+Every dot carries where it was in the original plan, where the plan now has it, where it is forecast, its variance (calendar-aware, like a module's), whether it has been reached, and whether it is critical. Branches are the modules that moved, as before. The definition is deliberately generic: modules start and finish in any project, and "flag a task" covers whatever else a team calls a checkpoint.
+
+**The module view** is the same picture one level down. Each task's finish is a dot (original, plan, forecast, variance, state, critical, added). A **branch for each task** that moved from its plan, with a step for every event that moved it: `DIRECT` if the event touched the task, `PROPAGATED` if it moved because something earlier on the driving chain moved (naming the nearest such task, `fromTaskIds`). Added work has no original and shows as a branch whose first step is `ADDED`. Planning changes make no steps: they move the plan and the forecast together, so they are markers only.
+
+**Flags.** Which tasks the project manager flagged live in `milestone_flags`, a view setting rather than part of the plan: they can change at any time, before or after the project starts, and are not frozen. A flagged id may belong to work that exists only in the log.
+
+**Dots that coincide.** Many dots fall on the same day (every module starts together). Dots within a few pixels are one cluster and are stacked in rows, most important on the line, then alternately above and below, so each can be seen and hovered.
+
 ### 3.7 Delay attribution (swappable)
 
 This is the part the owner will tune after trying scenarios, so it has three separate seams: the **strategy** (how days are divided), the **category rules** (how events are grouped), and a **reconciliation check** (no strategy can lose or invent days).
@@ -288,8 +316,8 @@ Neither is "right". They answer different questions, which is why both exist.
 
 | Event | Category |
 |---|---|
-| `SCOPE_CHANGE`, `REQUIREMENT_CHANGE` | **Late scope discovery** if phase is `DEVELOPMENT` or later, else Scope changes |
-| `FEEDBACK` | **Late feedback** if phase is `INTERNAL_REVIEW` or later, else Feedback |
+| `SCOPE_CHANGE`, `REQUIREMENT_CHANGE` | **Late scope discovery** if the phase is the project's "building starts" phase (`PhaseModel.buildStarts`) or later, else Scope changes |
+| `FEEDBACK` | **Late feedback** if the phase is the project's "first phase after building" (`PhaseModel.afterBuild`) or later, else Feedback |
 | `CLIENT_FEEDBACK` | Client feedback |
 | `RESOURCE_CHANGE`, `OWNERSHIP_TRANSFER` | Capacity changes |
 | `BLOCKER`, `DEPENDENCY_DELAY` | Dependency delays |
@@ -321,7 +349,9 @@ All computed from stored snapshots; nothing extra is persisted.
 - **Milestone history** (`milestoneHistory`) = one milestone's baseline and forecast at every revision (spec §20).
 - **Days to the client date** (`slackToTarget`) = working days between the forecast and the date promised to the client; computed from the project's target date and the snapshot's calendar, so it is always current and is not stored in snapshots.
 - **First breach** (`firstBreach`) = first snapshot where forecast > plan. This is *recognised* schedule impact. The spec §20 metric "time between first detectable risk and recognized impact" needs a notion of *detectable* risk (for example, float to target shrinking to zero) that is not designed yet.
-- **Progress %** = completed effort ÷ total current effort (effort-weighted, not task-count). Not built yet; part of the Control Room.
+- **Progress %** (`buildControlRoom`) = completed effort ÷ total current effort, effort-weighted so a ten-day task counts for ten times a one-day task. A finished task counts its estimate; one under way counts estimate minus remaining effort. `confirmedPercent` counts only what someone recorded; the gap is progress the forecast is taking on trust.
+- **Bottleneck** (`buildControlRoom`) = the first unfinished task on the driving chain is what is setting the pace now; the unfinished, non-critical tasks with the least float (default: two working days or less) are the likely next bottleneck.
+- **Retro** (`buildRetro`) = planned against actual, both attribution strategies, when feedback arrived (by phase, and the share after development finished), and what scope, resource, rework, dependency and planning changes cost. Observations are plain sentences, only for things that happened.
 
 ---
 
@@ -339,7 +369,8 @@ Changes from the first sketch, all deliberate:
 
 ```sql
 projects          (id PK, name, start_date, target_date, weekend_days JSON, holidays JSON, delivery_task_id,
-                   plan_revision, started_at, created_at)
+                   plan_revision, started_at, created_at, phases JSON /* NULL = the legacy phases */)
+milestone_flags   (project_id, task_id, flagged_at, flagged_by)   -- a view setting: not frozen when the project starts
 teams             (project_id, id, name)
 team_capacity     (project_id, team_id, from_date, headcount)           -- earliest row per team = planned
 modules           (project_id, id, name, kind /*DELIVERABLE|SHARED|PROJECT*/, scope_json, locked_at)
@@ -367,7 +398,11 @@ forecast_snapshots(project_id, plan_revision, revision, kind, event_id, void_id,
 - **Once the project has started, the plan rows are frozen entirely**: tasks, dependencies, modules (name, kind, scope), teams, capacity, features, and the calendar and delivery milestone. The rows are the plan *as it was at the start*. Every later change is a recorded plan edit or event, never an edit to the rows, so history shows it. The one thing that may still change is locking another module (`locked_at`). Name and target date stay editable: they are only labels.
 - `events`, `event_voids`, `plan_edits` and `forecast_snapshots` are **append-only**. Corrections are new rows.
 
+- A project's **phases** can be set until it starts, then they are frozen too (events refer to them).
+
 All trigger messages begin `LOCKED:`, which the API turns into `409`, and they say what to do instead.
+
+**Upgrading a database made by an earlier version.** The schema is applied on every start. Before it is, `openDatabase` adds any column an older database lacks (today: `projects.phases`). It only ever adds: nothing is rewritten, so existing data is untouched, and projects without phases of their own are read as having the legacy ones.
 
 **What is stored and what is derived.** Stored: the plan rows as they were at the start, the log (events, plan edits and voids, one shared sequence) and the snapshots as they were recorded. Derived on each request: the engine's current plan, by replaying the log over the rows. Recording, previewing, attribution and advisories use the replay. History views (forecast, snapshots, timeline) read the stored snapshots, so history shows what was recorded at the time even if the algorithm later changes.
 
@@ -386,12 +421,13 @@ Run it with `npm start -w @multiverse/server` (default `http://127.0.0.1:4000`).
 | Group | Endpoints |
 |---|---|
 | Health | `GET /health` |
-| Projects | `POST /projects` · `GET /projects` · `GET /projects/:id` · `PATCH /projects/:id` (name, target date; calendar until started) · `PUT /projects/:id/delivery` · `GET /projects/:id/validate` |
+| Projects | `POST /projects` (optionally with its own `phases`) · `GET /projects` · `GET /projects/:id` · `PATCH /projects/:id` (name, target date; calendar and phases until started) · `PUT /projects/:id/delivery` · `GET /projects/:id/validate` |
 | Blueprint (before the project starts) | `PUT /projects/:id/blueprint` (whole plan at once) · `POST/PATCH/DELETE` on `/teams`, `/modules`, `/tasks`, `/features` · `POST /capacity`, `DELETE /capacity?teamId=&from=` · `POST /dependencies`, `DELETE /dependencies/:predecessorId/:successorId` |
 | Locking | `POST /projects/:id/modules/:moduleId/lock` (the first lock starts the project and writes revision 0) |
 | Events | `POST /projects/:id/events/preview` · `POST /projects/:id/events` · `GET /projects/:id/events` (filter by `type`, `phase`, `moduleId`, `teamId`, `status`) · `GET /projects/:id/events/:eventId` · `POST /projects/:id/events/:eventId/void` |
 | Plan edits | `POST /projects/:id/plan-edits/preview` · `POST /projects/:id/plan-edits` · `GET /projects/:id/plan-edits` |
-| Views | `GET /projects/:id/forecast` (with `target`: days to spare or late against the client date) · `/snapshots` (`?full=true`) · `/snapshots/:revision` · `/timeline` · `/history` · `/milestones/:taskId/history` · `/advisories` (`?minModules=`) · `/attribution` (`?strategy=sequential\|counterfactual\|both`) |
+| Milestone flags | `GET /projects/:id/milestone-flags` · `PUT` and `DELETE /projects/:id/milestone-flags/:taskId` (flag a task as a project milestone, or take the flag off; allowed at any time) |
+| Views | `GET /projects/:id/forecast` (with `target`: days to spare or late against the client date) · `/snapshots` (`?full=true`) · `/snapshots/:revision` · `/timeline` (the project view: the original line, branches, markers, and the milestone dots) · `/modules/:moduleId/timeline` (one module: a dot for each task, a branch for each task that moved) · `/history` · `/milestones/:taskId/history` · `/advisories` (`?minModules=`) · `/attribution` (`?strategy=sequential\|counterfactual\|both`) |
 | Plan | `GET /projects/:id/plan` · `/plan-revisions` · `POST /projects/:id/rebuild-history` |
 
 `preview` is how the spec's step 6→7 works: the developer says "+2 days", the system answers with the schedule and effort impact, whether it is on the critical path, and the modules affected. It applies exactly the checks recording does and writes nothing. Plan edits have the same preview.
@@ -416,11 +452,17 @@ Run it with `npm start -w @multiverse/server` (default `http://127.0.0.1:4000`).
 
 **Security.** There is no authentication: it is a local tool. The server listens on `127.0.0.1` only unless `HOST` is set, so nothing else on the network can reach it. Do not expose it without adding authentication.
 
-**Not built yet:** `control-room` and `retro` (step 6, they need the progress and bottleneck calculations in the engine), people and ownership endpoints, and CORS (needed when the UI is served from a different port).
+**Screens.** `GET /projects/:id/control-room` (the engine's control room plus `target`, per-module `locked`, `contributors` and `advisories`), `/retro` (plus `target`) and `/current-tasks` (the plan as it stands, including work added after the start). Their shapes are in `packages/engine/src/contract.ts`; the server is type-checked against that file, so a field cannot be renamed on one side only.
+
+**The page.** If `packages/web/dist` exists (`npm run build -w @multiverse/web`), the server also serves it at `/`, with a content security policy that lets it load only its own files. Built files are named by their contents and cached for good; the page itself is never cached. An unknown path is still the API's JSON 404.
+
+**Not built yet:** people and ownership endpoints, creating a project from the UI, and CORS (not needed: the page and the API share an origin, and in development Vite proxies).
 
 ---
 
 ## 6. Thriveni seed and the five reference scenarios
+
+**A second sample, not a VR training.** `--sample community-centre` seeds a small community centre built on site (foundations, structure, services, fit-out, inspection and handover), Mon 5 Oct to Wed 18 Nov 2026 (33 working days), with phases of its own: brief, design, construction, inspection, handover, after handover. Its three demo events (rain delays the concrete pour, the client asks for a second fire exit, the inspector leaves a note) move handover to Mon 23 Nov (+3). It exists to show, and to test, that nothing in the tool is specific to VR.
 
 **Calendar.** Start Mon 5 Oct 2026, target Fri 30 Oct 2026 = exactly 20 working days.
 
@@ -516,14 +558,35 @@ Pure-function tests in `packages/engine`, run by Vitest, before any server or UI
 | Entering events | For standard cases the UI should offer **buttons and example text** (delay, finished, capacity, holiday, block, plan edit, void). The PowerShell helper's one-line commands are the prototype. |
 | First screen | The **Multiverse timeline** comes first, then the Control Room, then the Retro view. |
 
+### Decided (from testing the web app)
+
+| Topic | Decision |
+|---|---|
+| Two views of the timeline | The Multiverse timeline has **two levels**. The **project view** shows the whole project as dots on the original line: each module’s start and finish, and any task the project manager flagged. Clicking a module’s start dot (coloured, one colour for each module) opens that **module’s own timeline**, with a dot for each of its tasks. The branching rule is the same at both levels: a deviation from the original plan is a new branch (a branch for each module that moved on the project view; a branch for each task that moved on a module’s view). Leaving the module view returns to the project view. **Built** (§3.6b). |
+| Generic, not just VR | The tool is for **every kind of project**, not only VR modules. The definition of a *project milestone* is the same for all projects; a *module* is like a big sub-task with its own timeline. |
+| What a milestone is | **Automatic, plus flagged.** Every module’s start and finish is a dot on its own; a milestone task inside a module is one too; and the project manager can flag any other task as a project milestone (a view setting, allowed at any time). On a module’s own view the dots are **each task’s finish**. **Built.** |
+| Phases | **Each project defines its own** (§2.4), with a generic starting set. The retrospective’s "after development" follows the project’s own "building starts" and "first phase after building". The community-centre sample shows it with a building’s phases. **Built.** |
+| "We are here" | A **glowing green dot** shows where the project is right now on the timeline, like the live position of a train (spec section 19: train = current state). It follows today’s date, not the last re-forecast; the blue status line still shows when the forecast was last re-worked. **Built.** |
+| Branch start | A branch leaves the original line a short way before the day of the change. Keep. |
+| Time axis | Calendar dates with weekends shaded. Keep. |
+| Control room, needs-attention grouping, standard forms | Fine as they are for now. More feedback will come once PMs try it on a real project. |
+| Preview, then record | Useful. Keep. |
+| Date on a form | Starts on today. Keep. |
+| Retrospective | Both strategies read clearly. Keep. |
+| People | "Recording as" stays a typed name; accounts and ownership come later. |
+| What next | Continue with the plan: after the screens, the spec’s next phase is real-world validation with PMs and a real project. |
+
 ### Still open
 
-1. **Fork position.** A branch leaves the original line at the `asOf` of the first snapshot where the module deviated. The UI might prefer to fork at the module's planned position of the affected task. Both are derivable; settle it when the timeline UI is built.
+1. **Fork position.** *(Settled in the UI.)* A branch leaves the original line a short way before the `asOf` of the first snapshot where the module deviated, and arrives at its first node on that day. Forking at the planned position of the affected task is still derivable if you prefer it.
 2. **Late-discovery classification** (§3.7) uses the event's `phase`. If someone picks the wrong phase the label is wrong; whether the engine should second-guess it from recorded progress is open.
-3. **Unconfirmed warnings are many** if nobody records anything (17 by day 8). Grouping by module or showing only the critical path first is a presentation question for the UI.
+3. **Unconfirmed warnings are many** if nobody records anything (17 by day 8). The Control Room groups them by kind and shows two of each, with the rest one click away. Grouping by module, or showing only the critical path first, is still possible.
 4. **A holiday is an event**, so it counts as delay under *Capacity changes*. If the team prefers holidays to appear as planned calendar changes rather than delay, that is a labelling change.
 5. **A plan edit that absorbs a slip** shows as a negative share ("Planning changes −1") in the retro. Confirm this reads the way you want.
 6. **No authentication.** Fine for a local tool bound to `127.0.0.1`. Needed before anyone else uses it over a network.
+7. **Phases cannot be edited once the project starts**, and there is no screen to define them yet (they are set when a project is created through the API). Adding or renaming a phase mid-project, which would not disturb events already recorded, is possible later.
+8. **A flagged task that is later taken out of the plan** stays in the flag list, shown as "no longer in the plan", until someone removes the flag.
+9. **New-work dots with no original position** (work added after the project started, then flagged) are drawn where they are forecast, with a ring marking them as added. Whether they should sit on the original line at all is a presentation question.
 
 ---
 
@@ -537,4 +600,47 @@ Follows spec §30. Each step ends in something testable.
 4. **Attribution + advisories + timeline builder**, with strategy interface. *(done: 242 tests passing)*
 5. **Server + SQLite + seed** and the API from §5, tested with the Thriveni seed. *(done)*
 5b. **First round of testing feedback** (§8): holidays, plan edits as recorded history, client-date variance, both attribution strategies, unconfirmed-work warnings, the shared extinguisher, events refused on unlocked modules, and a fix to late actuals. *(done: 312 engine and 120 server tests, plus a manual run of every scenario against the real server)*
-6. **UI**: the Multiverse timeline first, then the Control Room, then the Retro view. Standard events (delay, finished, capacity, holiday, block, plan edit, void) as buttons with example text. The Control Room shows both variances; the Retro shows both attribution strategies. Needs engine pieces not built yet: progress %, the current bottleneck and the retro summary.
+6. **UI**: the Multiverse timeline first, then the Control Room, then the Retro view, and a screen to record changes. Standard events as buttons with example text; the Control Room shows both variances; the Retro shows both attribution strategies. *(done: 350 engine, 163 server and 117 web tests; see §10)*
+6b. **Third round of testing** (§8): the timeline in two levels (project view with milestone dots, a module’s own view, flagged milestones), the glowing "we are here" dot, phases that belong to the project (with an upgrade for older databases), generic wording, and a non-VR sample (a community centre). *(done: 415 engine, 205 server and 176 web tests)*
+
+---
+
+## 10. The web app, as built
+
+`packages/web`: React 19 and Vite, TypeScript, no state library and no chart library. Run it with `npm run dev -w @multiverse/web` while developing (Vite on 5173, proxying to the API on 4000), or build it (`npm run build -w @multiverse/web`) and let the server serve it at `/`.
+
+### Screens
+
+| Tab | What it is for | Built from |
+|---|---|---|
+| **Timeline** (first) | The Multiverse view, at two levels (§3.6b). The **project view**: the original plan is one line with a dot for each milestone (each module’s start, coloured by module, and finish, plus any task the project manager flagged); a branch leaves it for each module that has moved, delivery on its own emphasised branch. Click a module’s start dot to open **that module’s own view**: a dot for each task, and a branch for each task that moved. Branch nodes are the changes that moved it (hollow: float absorbed it). A row of markers along the top is every recorded change (circle = event, diamond = planning change, cross = withdrawn; solid when it moved the schedule or the plan). Weekends and holidays are shaded; the status date and client date are lines; a glowing green dot shows where we are today. Click or press Enter on a node or marker for the explanation. A table view has the same facts. | `/timeline`, `/modules/:id/timeline`, `/milestone-flags`, `/forecast`, `/events`, `/plan-edits`, `/snapshots/:n` |
+| **Control room** | One hero date and both lateness figures (against the plan; against the client date). Original plan, plan now, progress with how much is confirmed, status date. What is setting the pace, the critical chain in order, the likely next bottleneck and a watch list. Where the delay came from. How the forecast has moved. A row for every module. What needs attention, grouped. | `/control-room` |
+| **Retrospective** | Planned against actual. **Both** attribution strategies side by side, with the changes behind each. When feedback arrived (the share after development finished, by phase and by team). What each kind of change cost. Who tasks moved between. Plain-language findings. | `/retro` |
+| **Record a change** | Start modules (the first lock starts the project). The standard cases as buttons with an example sentence each; a short form for the one picked; **preview** (what it would do, nothing written) and then **record**. The history of everything recorded, with withdraw. | `/current-tasks`, `/events`, `/plan-edits`, preview and record routes |
+
+### How it is put together
+
+- **Pure view-model code, tested without a browser.** `lib/timelineLayout.ts` (where everything goes, at either level: one scene, `layoutScene`, with a project adapter and a module adapter), `lib/templates.ts` (the forms: answers in, API payload out), `lib/explain.ts` and `lib/describe.ts` (words for a change and for an effect), `lib/format.ts`, `lib/dates.ts`, `lib/palette.ts`. Components only draw what these decide.
+- **The forms are checked against the real API.** A server test posts what every template builds to the real server (preview, then record). That test found a real mismatch: the engine refuses to hold back a task that has already begun, but the form offered it. The form now offers only what the engine will take (`tasksFor` scopes: open, waiting, unstarted, any).
+- **One contract.** `packages/engine/src/contract.ts` names every shape the API serves. The server is compiled against it (`packages/server/src/contract-check.ts`) and the web app is written against it.
+- **Refresh model.** Recording or locking bumps a version; each view reloads. The old picture stays on screen, dimmed, until the new one arrives: no skeleton, no jump. A change of project drops the old data at once.
+- **The address is the state.** `#/<project>/<tab>`, so a view can be linked to and the back button works.
+- **Dates.** Every instant the engine reports is the *end* of a working day, so it is drawn at the right edge of that day. A status date that falls on a day off is drawn at the end of the last working day before it. The default date on a form is the later of today and the last status date, because the forecast never goes backwards.
+- **Text from the API is never parsed as HTML.** React escapes it; nothing uses `innerHTML`. The server sends a content security policy with the page.
+
+### Chart rules adopted
+
+From the data-visualisation checklist the charts follow:
+
+- Each module keeps one colour throughout, assigned in plan order and never by rank, so a module does not change colour when others deviate. Delivery is ink. The eight series colours are the validated categorical palette (light and dark are separately stepped); a ninth module would be neutral grey, never a generated hue.
+- Status is never colour alone: good, warning and critical each have their own icon and a word.
+- Three light-mode hues are under 3:1 contrast on the page, so every branch has visible direct labels (name at the left, finish date and slip at the right) and there is a table view.
+- One axis per chart, thin marks, solid hairline grid, direct labels only where they fit, values in text colours rather than series colours.
+- Hover and keyboard focus show the same readout; everything a tooltip says is also in the explanation panel or the table.
+- Light, dark and system themes; layouts checked at 375 px with no sideways scrolling (the timeline scrolls inside its own frame).
+- Dots that fall on the same day are stacked in rows rather than printed on top of each other, and the line and branches make room for the tallest stack. A label is printed only where nothing is stacked above it and there is room to either side; the rest are a hover away.
+- The address is the state: `#/<project>/timeline/<module>` is a module’s own view, so the back button and a shared link both work. Only the timeline tab has a module open; any other tab is the whole project.
+
+### Not in the UI yet
+
+Creating a project, defining a project’s phases (they are set through the API when it is created), editing the blueprint before the start, people and ownership, zooming a very long project, export and print, and authentication.

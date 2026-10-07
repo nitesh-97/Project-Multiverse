@@ -156,6 +156,27 @@ This is refused (`409 CANNOT_VOID`) if a later event relied on the one you are w
 Post '/projects' @{ id = 'acme'; name = 'Acme induction'; startDate = '2026-11-02'; targetDate = '2026-12-11' }
 ```
 
+**Phases.** Every project has its own list of phases, which is what an event says the project was in when it came up. Left
+out, a new project gets a generic set (Planning, Design, Build, Review, Client acceptance, Testing, Release, After
+delivery). To bring your own, give them when creating the project (or change them with `PATCH` until it starts):
+
+```powershell
+Post '/projects' @{
+  id = 'centre'; name = 'Community centre'; startDate = '2026-10-05'
+  phases = @{
+    phases = @(
+      @{ id = 'BRIEF'; name = 'Brief' }, @{ id = 'DESIGN'; name = 'Design' }, @{ id = 'CONSTRUCTION'; name = 'Construction' },
+      @{ id = 'INSPECTION'; name = 'Inspection' }, @{ id = 'HANDOVER'; name = 'Handover' }
+    )
+    buildStarts = 'CONSTRUCTION'    # scope found from here on is "late discovery"
+    afterBuild  = 'INSPECTION'      # feedback from here on arrived "after development"
+  }
+}
+```
+
+An event whose `phase` is not one of the project's phases is refused, and the message lists the ones it has. The Thriveni
+sample uses its own (Storyboard, Art, Development, Alpha ...), which is why the examples in this guide say `DEVELOPMENT`.
+
 Then load the blueprint in one call with `PUT /projects/acme/blueprint` (teams, capacity, modules, tasks, dependencies,
 features, and the delivery milestone), or build it piece by piece with the `POST` endpoints. A draft may be incomplete;
 `GET /projects/acme/validate` lists every problem. The body shape matches the plan in
@@ -201,6 +222,56 @@ Invoke-RestMethod "$api/projects/thriveni" -Method Get           # forecast.targ
 ```
 
 The client date is the project's `targetDate`; change it with `PATCH /projects/:id`.
+
+## 9. The views the screens use
+
+The web app reads three views that are derived from the same history; nothing extra is stored. All three need a started
+project (`409 NOT_STARTED` otherwise).
+
+```powershell
+$room = Invoke-RestMethod "$api/projects/thriveni/control-room"
+$room.forecast; $room.variance; $room.target         # when, how late against the plan, and against the client date
+$room.progress                                        # effort-weighted: percent, and confirmedPercent (recorded, not assumed)
+$room.bottleneck.current                              # the first unfinished task on the driving chain: what sets the pace
+$room.bottleneck.watchlist                            # unfinished work with little float, least first: the next bottleneck
+$room.modules                                         # progress, due and forecast dates, variance, and whether it is locked
+$room.contributors.byCategory                         # where the delay came from (sequential); also `advisories`, `trend`
+
+Invoke-RestMethod "$api/projects/thriveni/retro"      # planned vs actual, both attribution strategies, feedback timing, observations
+Invoke-RestMethod "$api/projects/thriveni/current-tasks"   # the plan as it stands now, including work added by events
+```
+
+`current-tasks` is what a form needs to offer a choice of tasks: each has its state (`DONE`, `IN_PROGRESS`,
+`NOT_STARTED`), dates, float, whether it is critical, whether it was `added` after the project started, whether its
+module is locked, and whether the forecast only `assumed` its state.
+
+The shapes are written down once, in [packages/engine/src/contract.ts](../packages/engine/src/contract.ts). The server is
+checked against them when it is compiled, and the web app is written against them.
+
+## 10. The two levels of the timeline, and flagging milestones
+
+The project view and a module's own view are separate endpoints:
+
+```powershell
+$t = Invoke-RestMethod "$api/projects/thriveni/timeline"
+$t.milestones | Select-Object name, kind, @{n='planned';e={$_.original.date}}, @{n='forecast';e={$_.forecast.date}}, variance
+$t.branches                                              # one for each module that moved, as before
+
+$m = Invoke-RestMethod "$api/projects/thriveni/modules/m5/timeline"
+$m.dots                                                  # a dot for each task: planned finish, forecast, variance, state
+$m.branches                                              # a branch for each task that moved, each step DIRECT or PROPAGATED
+```
+
+The dots on the project view are each module's start and finish, any milestone task, and any task you flag:
+
+```powershell
+Invoke-RestMethod "$api/projects/thriveni/milestone-flags/proj.review" -Method Put -ContentType 'application/json' -Body '{}'
+Invoke-RestMethod "$api/projects/thriveni/milestone-flags/proj.review" -Method Delete
+Invoke-RestMethod "$api/projects/thriveni/milestone-flags"   # the flagged task ids, in the order they were flagged
+```
+
+Flagging only changes which dots are drawn, so it is allowed at any time and is not recorded as history. A task that
+is not in the plan is `404`; a flag that is not there can be removed without complaint.
 
 ## Errors
 

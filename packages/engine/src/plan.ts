@@ -1,4 +1,5 @@
 import { PlanError } from './errors';
+import { validatePhaseModel } from './events';
 import { topologicalOrder } from './graph';
 import type { Plan } from './types';
 
@@ -11,7 +12,7 @@ function duplicates(ids: readonly string[]): string[] {
 
 /** Checks the structure of a plan and throws a single PlanError listing every problem found. */
 export function validatePlan(plan: Plan): void {
-  const issues: string[] = [];
+  const issues: string[] = plan.phases ? validatePhaseModel(plan.phases) : [];
 
   for (const [what, ids] of [
     ['team', plan.teams.map((t) => t.id)],

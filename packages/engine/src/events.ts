@@ -1,4 +1,4 @@
-import type { ISODate, ModuleId, Task, TaskId, TeamId, WorkDays } from './types';
+import type { ISODate, ModuleId, PhaseModel, Task, TaskId, TeamId, WorkDays } from './types';
 
 export type PersonId = string;
 
@@ -20,20 +20,70 @@ export const EVENT_TYPES = [
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
-/** In project order: a later phase means the work it concerns is further along. */
-export const PHASES = [
-  'PLANNING',
-  'STORYBOARD',
-  'ART',
-  'DEVELOPMENT',
-  'INTERNAL_REVIEW',
-  'ALPHA',
-  'CLIENT_REVIEW',
-  'QA',
-  'BETA',
-  'POST_DELIVERY',
-] as const;
-export type Phase = (typeof PHASES)[number];
+/** A phase id. The ones that exist are the project's own (`Plan.phases`); later in the list means further along. */
+export type Phase = string;
+
+/**
+ * The phases of the Thriveni project, and what any project that never chose its own is taken to have, so data recorded
+ * before phases became the project's own keeps its meaning.
+ */
+export const LEGACY_PHASES: PhaseModel = {
+  phases: [
+    { id: 'PLANNING', name: 'Planning' },
+    { id: 'STORYBOARD', name: 'Storyboard' },
+    { id: 'ART', name: 'Art' },
+    { id: 'DEVELOPMENT', name: 'Development' },
+    { id: 'INTERNAL_REVIEW', name: 'Internal review' },
+    { id: 'ALPHA', name: 'Alpha' },
+    { id: 'CLIENT_REVIEW', name: 'Client review' },
+    { id: 'QA', name: 'QA' },
+    { id: 'BETA', name: 'Beta' },
+    { id: 'POST_DELIVERY', name: 'After delivery' },
+  ],
+  buildStarts: 'DEVELOPMENT',
+  afterBuild: 'INTERNAL_REVIEW',
+};
+
+/** A starting point for a new project of any kind. Rename, add and remove to suit. */
+export const DEFAULT_PHASES: PhaseModel = {
+  phases: [
+    { id: 'PLANNING', name: 'Planning' },
+    { id: 'DESIGN', name: 'Design' },
+    { id: 'BUILD', name: 'Build' },
+    { id: 'REVIEW', name: 'Review' },
+    { id: 'ACCEPTANCE', name: 'Client acceptance' },
+    { id: 'TESTING', name: 'Testing' },
+    { id: 'RELEASE', name: 'Release' },
+    { id: 'AFTER_DELIVERY', name: 'After delivery' },
+  ],
+  buildStarts: 'BUILD',
+  afterBuild: 'REVIEW',
+};
+
+/** The phases a plan uses. */
+export const phaseModelOf = (plan: { phases?: PhaseModel | undefined }): PhaseModel => plan.phases ?? LEGACY_PHASES;
+
+/** Where a phase sits in the order, or -1 if the project has no such phase. */
+export const phaseIndex = (model: PhaseModel, id: Phase): number => model.phases.findIndex((p) => p.id === id);
+
+/** Every problem with a phase model, so a person can fix them all at once. Empty means it is usable. */
+export function validatePhaseModel(model: PhaseModel): string[] {
+  const issues: string[] = [];
+  const ids = model.phases.map((p) => p.id);
+  if (model.phases.length < 2) issues.push('A project needs at least two phases');
+  for (const p of model.phases) {
+    if (p.id.trim() === '' || /s/.test(p.id)) issues.push(`Phase id "${p.id}" must not be empty or contain spaces`);
+    if (p.name.trim() === '') issues.push(`Phase ${p.id} needs a name`);
+  }
+  const dupes = ids.filter((id, i) => ids.indexOf(id) !== i);
+  if (dupes.length > 0) issues.push(`Duplicate phase ids: ${[...new Set(dupes)].join(', ')}`);
+  const start = ids.indexOf(model.buildStarts);
+  const after = ids.indexOf(model.afterBuild);
+  if (start < 0) issues.push(`The phase where building starts ("${model.buildStarts}") is not one of the phases`);
+  if (after < 0) issues.push(`The first phase after building ("${model.afterBuild}") is not one of the phases`);
+  if (start >= 0 && after >= 0 && after <= start) issues.push('The first phase after building must come after the phase where building starts');
+  return issues;
+}
 
 /** A new task as given to ADD_TASK. New work cannot arrive with progress. */
 export type TaskDef = Omit<Task, 'progress'>;

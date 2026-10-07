@@ -3,7 +3,7 @@ import { carryForward } from './carry';
 import { applyEffects, hasStarted } from './effects';
 import type { EffectResult } from './effects';
 import { EffectError, PlanError } from './errors';
-import { PLAN_EDIT_OPS } from './events';
+import { PLAN_EDIT_OPS, phaseIndex, phaseModelOf } from './events';
 import type { Effect, Event, LogEntry, PlanEdit, VoidEntry } from './events';
 import { schedule } from './schedule';
 import type { Schedule } from './schedule';
@@ -152,6 +152,10 @@ const idUsed = (state: ProjectState, id: string): boolean => state.log.some((e) 
  */
 export function recordEvent(state: ProjectState, event: Event): ProjectState {
   if (idUsed(state, event.id)) throw new EffectError(`Event ${event.id}: id already used`, event.id);
+  const phases = phaseModelOf(state.plan);
+  if (phaseIndex(phases, event.phase) < 0) {
+    throw new EffectError(`Event ${event.id}: "${event.phase}" is not one of this project's phases (${phases.phases.map((p) => p.id).join(', ')})`, event.id);
+  }
   if (!isISODate(event.asOf)) throw new EffectError(`Event ${event.id}: invalid asOf "${event.asOf}"`, event.id);
 
   // Status dates never go backwards. A back-dated event keeps its occurredAt but is forecast as of "now".

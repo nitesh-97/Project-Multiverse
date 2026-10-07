@@ -1,3 +1,4 @@
+import { LEGACY_PHASES } from '@multiverse/engine';
 import type {
   CapacityPoint,
   Dependency,
@@ -8,6 +9,7 @@ import type {
   LogEntry,
   Module,
   ModuleKind,
+  PhaseModel,
   Plan,
   PlanEdit,
   Task,
@@ -21,6 +23,8 @@ type Param = string | number | null;
 
 export interface ProjectRecord {
   id: string;
+  /** The project's own phases. A project made before phases were its own has the legacy list. */
+  phases: PhaseModel;
   name: string;
   startDate: ISODate;
   targetDate: ISODate | null;
@@ -79,10 +83,10 @@ export class Store {
 
   insertProject(p: ProjectRecord): void {
     this.run(
-      `INSERT INTO projects (id, name, start_date, target_date, weekend_days, holidays, delivery_task_id, plan_revision, started_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO projects (id, name, start_date, target_date, weekend_days, holidays, delivery_task_id, plan_revision, started_at, created_at, phases)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       p.id, p.name, p.startDate, p.targetDate, JSON.stringify(p.weekendDays), JSON.stringify(p.holidays),
-      p.deliveryTaskId, p.planRevision, p.startedAt, p.createdAt,
+      p.deliveryTaskId, p.planRevision, p.startedAt, p.createdAt, JSON.stringify(p.phases),
     );
   }
 
@@ -98,6 +102,7 @@ export class Store {
       planRevision: r.plan_revision as number,
       startedAt: optStr(r.started_at) ?? null,
       createdAt: str(r.created_at),
+      phases: r.phases === null || r.phases === undefined ? LEGACY_PHASES : (JSON.parse(str(r.phases)) as PhaseModel),
     };
   }
 
@@ -112,7 +117,7 @@ export class Store {
 
   updateProject(
     id: string,
-    patch: Partial<Pick<ProjectRecord, 'name' | 'startDate' | 'targetDate' | 'weekendDays' | 'holidays' | 'deliveryTaskId'>>,
+    patch: Partial<Pick<ProjectRecord, 'name' | 'startDate' | 'targetDate' | 'weekendDays' | 'holidays' | 'deliveryTaskId' | 'phases'>>,
   ): void {
     const sets: string[] = [];
     const values: Param[] = [];
@@ -126,6 +131,7 @@ export class Store {
     if (patch.weekendDays !== undefined) set('weekend_days', JSON.stringify(patch.weekendDays));
     if (patch.holidays !== undefined) set('holidays', JSON.stringify(patch.holidays));
     if (patch.deliveryTaskId !== undefined) set('delivery_task_id', patch.deliveryTaskId);
+    if (patch.phases !== undefined) set('phases', JSON.stringify(patch.phases));
     if (sets.length === 0) return;
     this.run(`UPDATE projects SET ${sets.join(', ')} WHERE id = ?`, ...values, id);
   }
@@ -136,6 +142,22 @@ export class Store {
 
   setPlanRevision(id: string, revision: number): void {
     this.run('UPDATE projects SET plan_revision = ? WHERE id = ?', revision, id);
+  }
+
+  // ---------------------------------------------------------------------------------------------- milestone flags
+
+  /** The tasks flagged as project milestones, in the order they were flagged. */
+  listMilestoneFlags(pid: string): string[] {
+    return this.all('SELECT task_id FROM milestone_flags WHERE project_id = ? ORDER BY flagged_at, rowid', pid).map((r) => str(r.task_id));
+  }
+
+  /** Idempotent: flagging a flagged task changes nothing. */
+  addMilestoneFlag(pid: string, taskId: string, at: string, by: string | null): void {
+    this.run('INSERT OR IGNORE INTO milestone_flags (project_id, task_id, flagged_at, flagged_by) VALUES (?, ?, ?, ?)', pid, taskId, at, by);
+  }
+
+  removeMilestoneFlag(pid: string, taskId: string): void {
+    this.run('DELETE FROM milestone_flags WHERE project_id = ? AND task_id = ?', pid, taskId);
   }
 
   // ---------------------------------------------------------------------------------------------- blueprint
@@ -346,6 +368,7 @@ export class Store {
       tasks: this.listTasks(pid),
       dependencies: this.listDependencies(pid),
       deliveryTaskId: project.deliveryTaskId ?? '',
+      phases: project.phases,
     };
     const features = this.listFeatures(pid);
     if (features.length > 0) plan.features = features;

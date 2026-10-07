@@ -1,0 +1,956 @@
+/*
+ * Tokens first, roles everywhere else. The eight series colours are the validated categorical palette (light and dark
+ * are separately stepped, not flipped); status colours are fixed and always travel with an icon and a word.
+ */
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.1);
+  --wash: rgba(11, 11, 11, 0.035);
+  --wash-strong: rgba(11, 11, 11, 0.09);
+  --accent: #2a78d6;
+  --accent-wash: rgba(42, 120, 214, 0.1);
+  --on-accent: #ffffff;
+  --good: #0ca30c;
+  --good-text: #006300;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #4a3aa7;
+  --series-8: #e34948;
+  --series-other: #898781;
+  --shadow: 0 1px 2px rgba(11, 11, 11, 0.04);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.1);
+    --wash: rgba(255, 255, 255, 0.045);
+    --wash-strong: rgba(255, 255, 255, 0.1);
+    --accent: #3987e5;
+    --accent-wash: rgba(57, 135, 229, 0.16);
+    --good-text: #0ca30c;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
+    --series-7: #9085e9;
+    --series-8: #e66767;
+    --shadow: none;
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --ink: #ffffff;
+  --ink-2: #c3c2b7;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.1);
+  --wash: rgba(255, 255, 255, 0.045);
+  --wash-strong: rgba(255, 255, 255, 0.1);
+  --accent: #3987e5;
+  --accent-wash: rgba(57, 135, 229, 0.16);
+  --good-text: #0ca30c;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+  --shadow: none;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+h2 {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-2);
+  letter-spacing: 0.01em;
+}
+
+button,
+select,
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.muted {
+  color: var(--muted);
+}
+.secondary {
+  color: var(--ink-2);
+}
+.nowrap {
+  white-space: nowrap;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------------------------------ shell */
+
+.app {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 0 16px 48px;
+}
+
+.app-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+  padding: 16px 0 12px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.brand svg {
+  width: 26px;
+  height: 26px;
+}
+.brand small {
+  display: block;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+  letter-spacing: 0;
+}
+
+.header-spacer {
+  flex: 1 1 auto;
+}
+
+.header-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.field-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+
+select,
+input[type='text'],
+input[type='number'],
+input[type='date'],
+textarea {
+  background: var(--surface);
+  border: 1px solid var(--axis);
+  border-radius: 8px;
+  padding: 6px 10px;
+  min-height: 34px;
+  max-width: 100%;
+}
+
+textarea {
+  min-height: 64px;
+  resize: vertical;
+  width: 100%;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--grid);
+  margin-bottom: 20px;
+  overflow-x: auto;
+}
+
+.tab {
+  appearance: none;
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 10px 14px;
+  margin-bottom: -1px;
+  color: var(--ink-2);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tab:hover {
+  color: var(--ink);
+}
+.tab[aria-selected='true'] {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+.button {
+  appearance: none;
+  background: var(--surface);
+  border: 1px solid var(--axis);
+  border-radius: 8px;
+  padding: 6px 14px;
+  min-height: 34px;
+  cursor: pointer;
+  font-weight: 500;
+}
+.button:hover:not(:disabled) {
+  background: var(--wash);
+}
+.button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+.button.primary:hover:not(:disabled) {
+  background: var(--accent);
+  filter: brightness(1.08);
+}
+.button.small {
+  min-height: 28px;
+  padding: 2px 10px;
+  font-size: 13px;
+}
+.button.quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--ink-2);
+}
+
+/* ------------------------------------------------------------------------------------------ layout pieces */
+
+.screen {
+  display: grid;
+  gap: 16px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+  box-shadow: var(--shadow);
+  min-width: 0;
+}
+
+.card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 16px;
+  margin-bottom: 12px;
+}
+
+.card-head .sub {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.cols-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.cols-3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+.main-side {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 16px;
+  align-items: start;
+}
+
+.dim {
+  opacity: 0.55;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+}
+
+.empty {
+  padding: 28px 8px;
+  text-align: center;
+  color: var(--ink-2);
+}
+.empty strong {
+  display: block;
+  color: var(--ink);
+  margin-bottom: 4px;
+}
+
+.notice {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--wash);
+  border: 1px solid var(--border);
+}
+.notice.error {
+  border-color: var(--critical);
+}
+
+/* ------------------------------------------------------------------------------------------ status */
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.status svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+.status--good svg {
+  color: var(--good);
+}
+.status--warning svg {
+  color: var(--warning);
+}
+.status--info svg {
+  color: var(--ink-2);
+}
+.status--critical svg {
+  color: var(--critical);
+}
+
+/* ------------------------------------------------------------------------------------------ tiles and the hero */
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 12px;
+}
+
+.tile {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  min-width: 0;
+}
+.tile .label {
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.tile .value {
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 2px 0;
+}
+.tile .detail {
+  color: var(--ink-2);
+  font-size: 13px;
+}
+
+.hero {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 32px;
+}
+.hero .figure {
+  font-size: 48px;
+  line-height: 1.05;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+.hero .caption {
+  color: var(--ink-2);
+  max-width: 46ch;
+}
+
+.meter {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--accent-wash);
+  overflow: hidden;
+  position: relative;
+}
+.meter > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 4px;
+  background: var(--accent);
+  opacity: 0.4;
+}
+/* Confirmed progress is the same blue, solid: the paler part is progress the forecast is taking on trust. */
+.meter > span.confirmed {
+  opacity: 1;
+}
+
+/* ------------------------------------------------------------------------------------------ lists and tables */
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+th,
+td {
+  text-align: left;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--grid);
+  vertical-align: top;
+}
+th {
+  font-weight: 600;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+td.num,
+th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+tbody tr:last-child td {
+  border-bottom: 0;
+}
+.table-wrap {
+  overflow-x: auto;
+}
+
+.chain {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.chain li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.chain li + li::before {
+  content: '\2192';
+  color: var(--muted);
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--wash);
+  border: 1px solid var(--border);
+  font-size: 13px;
+}
+.chip.current {
+  background: var(--accent-wash);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.chip .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.plain-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+/* horizontal bars: one hue, a value on the tip, labels in ink */
+.bars {
+  display: grid;
+  gap: 10px;
+}
+.bar-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 190px) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+.bar-track {
+  position: relative;
+  height: 18px;
+}
+.bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  min-width: 2px;
+  border-radius: 0 4px 4px 0;
+  background: var(--series-1);
+}
+.bar.muted-bar {
+  background: var(--axis);
+}
+.bar.negative {
+  background: var(--series-2);
+}
+.bar-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  min-width: 4.5em;
+  text-align: right;
+}
+
+/* ------------------------------------------------------------------------------------------ the timeline */
+
+.chart-frame {
+  overflow-x: auto;
+  border-radius: 8px;
+}
+.chart {
+  display: block;
+  user-select: none;
+}
+.chart text {
+  font: 12px system-ui, -apple-system, 'Segoe UI', sans-serif;
+  fill: var(--ink-2);
+}
+.chart .strong {
+  fill: var(--ink);
+  font-weight: 600;
+}
+.chart .faint {
+  fill: var(--muted);
+}
+.chart .axis-line {
+  stroke: var(--axis);
+  stroke-width: 1;
+}
+.chart .grid-line {
+  stroke: var(--grid);
+  stroke-width: 1;
+}
+.chart .weekend {
+  fill: var(--wash);
+}
+.chart .holiday {
+  fill: var(--wash-strong);
+}
+.chart .original-line {
+  stroke: var(--ink-2);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+.chart .plan-extension {
+  stroke: var(--muted);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+.chart .lane-line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.chart .lane-line.delivery {
+  stroke-width: 3;
+}
+.chart .ring {
+  stroke: var(--surface);
+  stroke-width: 2;
+}
+.chart .hollow {
+  fill: var(--surface);
+}
+.chart .status-line {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+.chart .client-line {
+  stroke: var(--ink);
+  stroke-width: 1.5;
+}
+.chart .hit {
+  fill: transparent;
+  cursor: pointer;
+}
+.chart .selected {
+  stroke: var(--ink);
+  stroke-width: 2;
+}
+.chart .crosshair {
+  stroke: var(--ink-2);
+  stroke-width: 1;
+  pointer-events: none;
+}
+.chart .lane-name {
+  fill: var(--ink);
+  font-weight: 600;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  color: var(--ink-2);
+  font-size: 13px;
+  margin-top: 10px;
+}
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.key-line {
+  width: 18px;
+  height: 0;
+  border-top: 3px solid var(--ink);
+  border-radius: 2px;
+}
+.key-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--ink-2);
+}
+.key-diamond {
+  width: 9px;
+  height: 9px;
+  background: var(--ink-2);
+  transform: rotate(45deg);
+}
+.key-band {
+  width: 16px;
+  height: 10px;
+  background: var(--wash-strong);
+  border: 1px solid var(--border);
+}
+
+.tooltip {
+  position: fixed;
+  z-index: 20;
+  max-width: 320px;
+  pointer-events: none;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--axis);
+  border-radius: 10px;
+  padding: 9px 12px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16);
+  font-size: 13px;
+}
+.tooltip .t-title {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.tooltip .t-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-2);
+}
+.tooltip .t-value {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.explain h3 {
+  margin: 14px 0 6px;
+}
+.explain p {
+  margin: 4px 0;
+}
+.explain .headline {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+/* ------------------------------------------------------------------------------------------ forms */
+
+.template-groups {
+  display: grid;
+  gap: 18px;
+}
+.template-group h3 {
+  margin-bottom: 8px;
+}
+.template-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 10px;
+}
+.template-button {
+  appearance: none;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  display: grid;
+  gap: 2px;
+}
+.template-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+}
+.template-button[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+}
+.template-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.template-button .t-name {
+  font-weight: 600;
+}
+.template-button .t-example {
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.template-button .t-why {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.form {
+  display: grid;
+  gap: 14px;
+}
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px 16px;
+}
+.field {
+  display: grid;
+  gap: 4px;
+  align-content: start;
+  min-width: 0;
+}
+.field > label,
+.field > .label {
+  font-weight: 500;
+}
+.field .help {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.field input,
+.field select {
+  width: 100%;
+}
+.field .with-suffix {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.field .suffix {
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.checks {
+  display: grid;
+  gap: 4px;
+  max-height: 180px;
+  overflow: auto;
+  padding: 6px 8px;
+  border: 1px solid var(--axis);
+  border-radius: 8px;
+}
+.checks label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.problems {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--ink);
+}
+
+.log-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.log-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 4px 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--grid);
+  align-items: start;
+}
+.log-item:last-child {
+  border-bottom: 0;
+}
+.log-item.voided .log-title {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+.log-glyph {
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+}
+.log-title {
+  font-weight: 600;
+}
+.log-meta {
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.tag {
+  display: inline-block;
+  font-size: 12px;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--wash);
+  color: var(--ink-2);
+  margin-right: 4px;
+}
+
+.sparkline {
+  display: block;
+}
+.sparkline path {
+  fill: none;
+  stroke: var(--series-1);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.sparkline .base {
+  stroke: var(--axis);
+  stroke-width: 1;
+}
+
+/* ------------------------------------------------------------------------------------------ small screens */
+
+@media (max-width: 900px) {
+  .main-side,
+  .cols-2,
+  .cols-3 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .hero .figure {
+    font-size: 40px;
+  }
+  .bar-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .bar-row .bar-label {
+    grid-column: 1 / -1;
+  }
+}
+
+/* The train: a calm pulse around where the project is right now. Off for anyone who asks for less motion (below). */
+.chart .here-pulse {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: here-pulse 2.4s ease-out infinite;
+  pointer-events: none;
+}
+@keyframes here-pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(2.8);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}

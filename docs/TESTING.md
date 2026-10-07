@@ -1,7 +1,8 @@
 # Testing guide (second round)
 
 About an hour. You will load the Thriveni reference project, throw events at it, and judge whether the answers are the
-ones you would want. There is no UI yet; a PowerShell helper prints readable summaries.
+ones you would want. This guide drives the server from PowerShell, which prints readable summaries. The web app has its
+own guide: [TESTING-UI.md](TESTING-UI.md).
 
 Everything below was run against the real server before this guide was written, and the numbers are what it produced.
 If you see something different, that is a finding: tell me what you typed and what you saw.
@@ -25,7 +26,7 @@ Your answers from the first round are all implemented. In short:
 
 ```powershell
 cd "C:\AI Test Projects\Project Multiverse"
-npm test                                    # 312 engine + 120 server tests should pass
+npm test                                    # 415 engine + 205 server + 176 web tests should pass
 
 Remove-Item packages\server\data -Recurse -Force -ErrorAction SilentlyContinue    # start clean
 npm run seed -w @multiverse/server                                    # project "thriveni": the main one

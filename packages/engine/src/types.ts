@@ -94,6 +94,24 @@ export interface Dependency {
   type: 'FS';
 }
 
+/** One phase of a project, as it appears on an event ("found while in Testing"). */
+export interface PhaseDef {
+  id: string;
+  name: string;
+}
+
+/**
+ * The phases a project goes through, in order, and the two that the retrospective needs to know about. Every kind of
+ * project has its own: a game, a building and a research study do not share them.
+ */
+export interface PhaseModel {
+  phases: PhaseDef[];
+  /** The phase in which building starts. Scope found from here on is late discovery. */
+  buildStarts: string;
+  /** The first phase after building has finished. Feedback from here on arrived after development. */
+  afterBuild: string;
+}
+
 export interface Plan {
   calendar: CalendarSpec;
   teams: Team[];
@@ -105,4 +123,6 @@ export interface Plan {
   features?: Feature[];
   /** The milestone whose finish is the project delivery date. Must have no successors. */
   deliveryTaskId: TaskId;
+  /** The project's own phases. Without them a project uses `LEGACY_PHASES`, which is what existing projects have. */
+  phases?: PhaseModel;
 }
