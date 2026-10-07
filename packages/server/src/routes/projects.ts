@@ -21,7 +21,7 @@ export function registerProjectRoutes(app: FastifyInstance, svc: ProjectService)
   app.patch('/projects/:id', async (req) => {
     const { id } = params<{ id: string }>(req);
     const patch = projectPatch.parse(req.body);
-    svc.edit(id, (s) => s.updateProject(id, patch), { replan: patch.startDate !== undefined || patch.weekendDays !== undefined || patch.holidays !== undefined });
+    svc.edit(id, (s) => s.updateProject(id, patch));
     return svc.projectView(id);
   });
 

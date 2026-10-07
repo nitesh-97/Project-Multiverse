@@ -37,6 +37,13 @@ export function registerViewRoutes(app: FastifyInstance, svc: ProjectService): v
     return svc.advisories(params<{ id: string }>(req).id, min);
   });
 
-  /** Who or what caused the delay. `?strategy=sequential` (default) or `counterfactual`. */
-  app.get('/projects/:id/attribution', async (req) => svc.attribution(params<{ id: string }>(req).id, query(req).strategy ?? 'sequential'));
+  /**
+   * Who or what caused the delay. `?strategy=sequential` (default), `counterfactual`, or `both` (side by side, as the
+   * retrospective shows them).
+   */
+  app.get('/projects/:id/attribution', async (req) => {
+    const id = params<{ id: string }>(req).id;
+    const strategy = query(req).strategy ?? 'sequential';
+    return strategy === 'both' ? svc.attributionBoth(id) : svc.attribution(id, strategy);
+  });
 }

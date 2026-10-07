@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { eventBody, voidBody } from '../schemas';
+import { eventBody, planEditBody, voidBody } from '../schemas';
 import type { ProjectService } from '../service';
 import { params, query } from './util';
 
@@ -31,6 +31,20 @@ export function registerEventRoutes(app: FastifyInstance, svc: ProjectService): 
     const { id, eventId } = params<{ id: string; eventId: string }>(req);
     return svc.eventDetail(id, eventId);
   });
+
+  /**
+   * Planning changes to modules that have not started, made after the project started: re-estimate, add or remove
+   * work, change dependencies. Recorded in history like an event, but it moves the plan as well as the forecast, so it
+   * is planning, not delay. Refused for modules that are locked (use an event) and for work that has started.
+   */
+  app.post('/projects/:id/plan-edits/preview', async (req) => svc.previewPlanEdit(params<{ id: string }>(req).id, planEditBody.parse(req.body)));
+
+  app.post('/projects/:id/plan-edits', async (req, reply) => {
+    const result = svc.recordPlanEdit(params<{ id: string }>(req).id, planEditBody.parse(req.body));
+    return reply.code(201).send(result);
+  });
+
+  app.get('/projects/:id/plan-edits', async (req) => svc.listPlanEdits(params<{ id: string }>(req).id));
 
   /** Withdraws a mistaken event. It stays in the log; a VOID snapshot records the correction. */
   app.post('/projects/:id/events/:eventId/void', async (req, reply) => {

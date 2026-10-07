@@ -59,7 +59,35 @@ export type Effect =
   /** Records actuals. Fields left undefined are kept; `null` clears a field. Recording `finishedOn` clears `remaining`. */
   | { op: 'RECORD_PROGRESS'; taskId: TaskId; startedOn?: ISODate | null; remaining?: WorkDays | null; finishedOn?: ISODate | null }
   /** Changes the owner. `contextCost` is extra effort the new owner needs to get up to speed. */
-  | { op: 'TRANSFER_OWNER'; taskId: TaskId; toPersonId: PersonId; contextCost?: WorkDays };
+  | { op: 'TRANSFER_OWNER'; taskId: TaskId; toPersonId: PersonId; contextCost?: WorkDays }
+  /** A day nobody works (a public holiday). Must be after the status date and not already a non-working day. */
+  | { op: 'ADD_HOLIDAY'; date: ISODate };
+
+/** The effects a planning change to a module that has not started may use. Calendar, capacity and actuals are events. */
+export const PLAN_EDIT_OPS = [
+  'ADD_TASK',
+  'ADJUST_ESTIMATE',
+  'REMOVE_TASK',
+  'ADD_DEPENDENCY',
+  'REMOVE_DEPENDENCY',
+  'BLOCK_UNTIL',
+] as const;
+export type PlanEditEffect = Extract<Effect, { op: (typeof PLAN_EDIT_OPS)[number] }>;
+
+/**
+ * A change to the plan of a module that has not started yet, made after the project started. It is recorded in the
+ * log like an event, so history shows what changed, when, and why. Unlike an event it moves the *baseline* as well as
+ * the forecast, because it is planning, not slippage.
+ */
+export interface PlanEdit {
+  id: string;
+  title: string;
+  reason?: string;
+  createdBy: string;
+  /** Status date (end of that working day) for the forecast this edit triggers. Clamped to never go backwards. */
+  asOf: ISODate;
+  effects: PlanEditEffect[];
+}
 
 /**
  * Spec §7. `projectId` and `recordedAt` are persistence concerns and live on the stored row, not here.
@@ -102,4 +130,4 @@ export interface VoidEntry {
 }
 
 /** The project log in recorded order. */
-export type LogEntry = { kind: 'EVENT'; event: Event } | VoidEntry;
+export type LogEntry = { kind: 'EVENT'; event: Event } | { kind: 'PLAN'; edit: PlanEdit } | VoidEntry;

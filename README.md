@@ -6,13 +6,14 @@ their impact through dependencies and capacity, and explains why the delivery da
 - [PROJECT_MULTIVERSE_SPEC.md](PROJECT_MULTIVERSE_SPEC.md): what the product is and why
 - [DESIGN.md](DESIGN.md): how it works (domain model, engine, schema, API) and the decisions behind it
 - [docs/API.md](docs/API.md): the HTTP API, with PowerShell examples
+- [docs/TESTING.md](docs/TESTING.md): a guided hour of testing, with expected results (start here to try it)
 
 ## Status
 
 | Part | State |
 |---|---|
-| `packages/engine`: scheduling, events, forecast snapshots, timeline, attribution, advisories | built, 242 tests |
-| `packages/server`: SQLite persistence and the HTTP API | built, 89 tests |
+| `packages/engine`: scheduling, events and plan edits, forecast snapshots, timeline, attribution, advisories | built, 312 tests |
+| `packages/server`: SQLite persistence and the HTTP API | built, 120 tests |
 | `packages/web`: timeline, Control Room and Retro views | not started |
 
 ## Requirements
@@ -23,7 +24,7 @@ Node 22.13 or newer (developed on Node 24). Nothing else: SQLite is built into N
 
 ```bash
 npm install
-npm test                 # engine and server tests
+npm test                 # engine and server tests (432 in all)
 npm run typecheck
 ```
 

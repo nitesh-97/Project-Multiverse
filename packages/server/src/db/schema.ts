@@ -5,23 +5,28 @@
  *  - a task of a locked module cannot be inserted, changed or deleted: new work after lock must be an event
  *  - a dependency whose successor is in a locked module cannot be added or removed
  *  - a locked module cannot be changed or deleted
- *  - once a project has started, its calendar, teams, capacity and features are frozen
- *  - events, voids and forecast snapshots are append-only
+ *  - once a project has started, its plan rows, calendar, teams, capacity and features are frozen: later changes are
+ *    recorded as plan edits or events, never as edits to the rows
+ *  - events, voids, plan edits and forecast snapshots are append-only
  *
  * Every trigger message starts with "LOCKED:" so the API can turn it into a 409.
  */
 
 const LOCKED_MODULE = `EXISTS (SELECT 1 FROM modules m WHERE m.project_id = %ROW%.project_id AND m.id = %ROW%.module_id AND m.locked_at IS NOT NULL)`;
 
+const FROZEN_BASELINE = 'LOCKED: the project has started, so its baseline can no longer change; record changes as events';
+const FROZEN_PLAN =
+  'LOCKED: the project has started, so its plan cannot be edited directly; record a plan edit (for modules that have not started) or an event (for modules that have)';
+
 /** Triggers that make a table read-only once its project has started. */
-function frozenAfterStart(table: string, what: string): string {
+function frozenAfterStart(table: string, message: string): string {
   return (['INSERT', 'UPDATE', 'DELETE'] as const)
     .map((op) => {
       const row = op === 'INSERT' ? 'NEW' : 'OLD';
       return `
 CREATE TRIGGER IF NOT EXISTS ${table}_frozen_${op.toLowerCase()} BEFORE ${op} ON ${table}
 WHEN EXISTS (SELECT 1 FROM projects p WHERE p.id = ${row}.project_id AND p.started_at IS NOT NULL)
-BEGIN SELECT RAISE(ABORT, 'LOCKED: the project has started, so its baseline ${what} can no longer change; record changes as events'); END;`;
+BEGIN SELECT RAISE(ABORT, '${message}'); END;`;
     })
     .join('\n');
 }
@@ -154,6 +159,21 @@ CREATE TABLE IF NOT EXISTS events (
   UNIQUE (project_id, seq)
 );
 
+-- Planning changes to modules that had not started, made after the project started. Part of the same log.
+CREATE TABLE IF NOT EXISTS plan_edits (
+  project_id   TEXT NOT NULL REFERENCES projects(id),
+  id           TEXT NOT NULL,
+  seq          INTEGER NOT NULL,
+  title        TEXT NOT NULL,
+  reason       TEXT,
+  created_by   TEXT NOT NULL,
+  as_of        TEXT NOT NULL,
+  recorded_at  TEXT NOT NULL,
+  effects_json TEXT NOT NULL,
+  PRIMARY KEY (project_id, id),
+  UNIQUE (project_id, seq)
+);
+
 CREATE TABLE IF NOT EXISTS event_voids (
   project_id  TEXT NOT NULL REFERENCES projects(id),
   id          TEXT NOT NULL,
@@ -229,11 +249,30 @@ CREATE TRIGGER IF NOT EXISTS projects_started_once BEFORE UPDATE OF started_at O
 WHEN OLD.started_at IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'LOCKED: the project has already started'); END;
 
-${frozenAfterStart('teams', 'teams')}
-${frozenAfterStart('team_capacity', 'capacity')}
-${frozenAfterStart('features', 'features')}
-${frozenAfterStart('module_features', 'feature links')}
+-- Once the project has started, the plan rows are the plan as it was at the start. Every later change is a recorded
+-- plan edit or event, so history shows it; the rows themselves never change. (Locking a module sets locked_at,
+-- which is the one column that may still change.)
+${frozenAfterStart('tasks', FROZEN_PLAN)}
+${frozenAfterStart('dependencies', FROZEN_PLAN)}
+${frozenAfterStart('teams', FROZEN_BASELINE)}
+${frozenAfterStart('team_capacity', FROZEN_BASELINE)}
+${frozenAfterStart('features', FROZEN_BASELINE)}
+${frozenAfterStart('module_features', FROZEN_BASELINE)}
+
+CREATE TRIGGER IF NOT EXISTS modules_frozen_insert BEFORE INSERT ON modules
+WHEN EXISTS (SELECT 1 FROM projects p WHERE p.id = NEW.project_id AND p.started_at IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, '${FROZEN_PLAN}'); END;
+
+CREATE TRIGGER IF NOT EXISTS modules_frozen_delete BEFORE DELETE ON modules
+WHEN EXISTS (SELECT 1 FROM projects p WHERE p.id = OLD.project_id AND p.started_at IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, '${FROZEN_PLAN}'); END;
+
+CREATE TRIGGER IF NOT EXISTS modules_frozen_update BEFORE UPDATE OF name, kind, scope_json ON modules
+WHEN EXISTS (SELECT 1 FROM projects p WHERE p.id = OLD.project_id AND p.started_at IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, '${FROZEN_PLAN}'); END;
+
 ${appendOnly('events')}
 ${appendOnly('event_voids')}
+${appendOnly('plan_edits')}
 ${appendOnly('forecast_snapshots')}
 `;

@@ -107,13 +107,24 @@ const taskDef = z.strictObject({
   featureId: id.optional(),
 });
 
+/** The effects a planning change may use: reshaping the plan of work that has not started. */
+const addTask = z.strictObject({ op: z.literal('ADD_TASK'), task: taskDef, dependsOn: z.array(id).default([]), blocks: z.array(id).default([]) });
+const adjustEstimate = z.strictObject({ op: z.literal('ADJUST_ESTIMATE'), taskId: id, delta: days });
+const removeTask = z.strictObject({ op: z.literal('REMOVE_TASK'), taskId: id });
+const addDependency = z.strictObject({ op: z.literal('ADD_DEPENDENCY'), predecessorId: id, successorId: id });
+const removeDependency = z.strictObject({ op: z.literal('REMOVE_DEPENDENCY'), predecessorId: id, successorId: id });
+const blockUntil = z.strictObject({ op: z.literal('BLOCK_UNTIL'), taskId: id, date: date.nullable() });
+
+export const planEffectSchema = z.discriminatedUnion('op', [addTask, adjustEstimate, removeTask, addDependency, removeDependency, blockUntil]);
+
 export const effectSchema = z.discriminatedUnion('op', [
-  z.strictObject({ op: z.literal('ADD_TASK'), task: taskDef, dependsOn: z.array(id).default([]), blocks: z.array(id).default([]) }),
-  z.strictObject({ op: z.literal('ADJUST_ESTIMATE'), taskId: id, delta: days }),
-  z.strictObject({ op: z.literal('REMOVE_TASK'), taskId: id }),
-  z.strictObject({ op: z.literal('ADD_DEPENDENCY'), predecessorId: id, successorId: id }),
-  z.strictObject({ op: z.literal('REMOVE_DEPENDENCY'), predecessorId: id, successorId: id }),
-  z.strictObject({ op: z.literal('BLOCK_UNTIL'), taskId: id, date: date.nullable() }),
+  addTask,
+  adjustEstimate,
+  removeTask,
+  addDependency,
+  removeDependency,
+  blockUntil,
+  z.strictObject({ op: z.literal('ADD_HOLIDAY'), date }),
   z.strictObject({ op: z.literal('SET_CAPACITY'), teamId: id, from: date, headcount: nonNegative }),
   z.strictObject({
     op: z.literal('RECORD_PROGRESS'),
@@ -152,5 +163,20 @@ export const eventBody = z.strictObject({
 
 export const voidBody = z.strictObject({ id: id.optional(), asOf: date, reason: z.string().optional() });
 
+/**
+ * A planning change to modules that have not started, made after the project started. It is recorded in the log, so
+ * history shows what changed, when and why, and it moves the plan as well as the forecast.
+ */
+export const planEditBody = z.strictObject({
+  id: id.optional(),
+  title: text,
+  reason: z.string().optional(),
+  createdBy: text,
+  /** Status date for the forecast this edit triggers (end of that working day). Required: there is no clock. */
+  asOf: date,
+  effects: z.array(planEffectSchema).min(1).max(500),
+});
+
 export type EventInput = z.output<typeof eventBody>;
+export type PlanEditInput = z.output<typeof planEditBody>;
 export const asEffects = (e: EventInput['effects']): Effect[] => e as Effect[];

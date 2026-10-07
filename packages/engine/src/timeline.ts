@@ -9,7 +9,7 @@ export interface BranchStep {
   /** The snapshot this step comes from. */
   revision: number;
   kind: Exclude<SnapshotKind, 'BASELINE'>;
-  /** The event that caused the step; for a VOID, the event that was withdrawn. */
+  /** The event or plan edit that caused the step (see `kind`); for a VOID, the event that was withdrawn. */
   eventId: string;
   asOf: ISODate;
   /** Change in the module's variance at this step (negative = recovery). */
@@ -42,14 +42,17 @@ export interface Branch {
   steps: BranchStep[];
 }
 
-/** Every event and void, including those that moved nothing (so effort without schedule impact stays visible). */
+/** Every event, plan edit and void, including those that moved nothing (so effort without schedule impact stays visible). */
 export interface EventMarker {
   revision: number;
   kind: Exclude<SnapshotKind, 'BASELINE'>;
+  /** The event or plan edit id (see `kind`); for a VOID, the event that was withdrawn. */
   eventId: string;
   asOf: ISODate;
   effortImpact: WorkDays;
   stepDays: WorkDays;
+  /** How far the plan itself moved: non-zero only for plan edits. */
+  baselineStepDays: WorkDays;
   absorbed: boolean;
   onCriticalPath: boolean;
   modulesMoved: number;
@@ -57,13 +60,17 @@ export interface EventMarker {
 }
 
 export interface Timeline {
-  /** The original line: the baseline plan, which never changes. */
+  /** The original line: the plan as it was when the project started (revision 0), which never changes. */
   original: {
     delivery: DatedOffset;
     modules: Array<{ moduleId: ModuleId; name: string; kind: ModuleKind; finish: DatedOffset }>;
     milestones: Array<{ taskId: TaskId; name: string; moduleId: ModuleId; baseline: DatedOffset }>;
   };
-  current: { delivery: DatedOffset; variance: WorkDays; asOf: ISODate | null };
+  /**
+   * `planDelivery` is the plan as it stands now. It differs from `original.delivery` once planning changes have
+   * refined the plan; `variance` is measured against it.
+   */
+  current: { delivery: DatedOffset; planDelivery: DatedOffset; variance: WorkDays; asOf: ISODate | null };
   /** One per deviating module, in the order they first deviated. */
   branches: Branch[];
   markers: EventMarker[];
@@ -90,7 +97,7 @@ export function buildTimeline(state: ProjectState): Timeline {
     const explanation = explainSnapshot(before, now);
     const kind = now.kind as Exclude<SnapshotKind, 'BASELINE'>;
     const asOf = now.asOf as ISODate;
-    const eventId = now.eventId as string;
+    const eventId = (now.eventId ?? now.planEditId) as string;
 
     for (const change of explanation.modules) {
       const module = now.modules[change.moduleId];
@@ -136,6 +143,7 @@ export function buildTimeline(state: ProjectState): Timeline {
       asOf,
       effortImpact: now.effortImpact,
       stepDays: now.stepDays,
+      baselineStepDays: now.baselineStepDays ?? 0,
       absorbed: explanation.absorbed,
       onCriticalPath: explanation.onCriticalPath,
       modulesMoved: explanation.modules.length,
@@ -171,7 +179,7 @@ export function buildTimeline(state: ProjectState): Timeline {
         };
       }),
     },
-    current: { delivery: last.forecastDelivery, variance: last.variance, asOf: last.asOf },
+    current: { delivery: last.forecastDelivery, planDelivery: last.baselineDelivery, variance: last.variance, asOf: last.asOf },
     branches: [...branches.values()],
     markers,
   };

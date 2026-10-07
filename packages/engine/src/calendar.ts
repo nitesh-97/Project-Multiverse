@@ -47,6 +47,30 @@ function dayOfWeek(n: number): number {
   return (((n + 4) % 7) + 7) % 7;
 }
 
+const calendarKey = (c: CalendarSpec): string =>
+  JSON.stringify([c.startDate, [...c.weekendDays].sort(), [...new Set(c.holidays)].sort()]);
+
+export function sameCalendar(a: CalendarSpec, b: CalendarSpec): boolean {
+  return calendarKey(a) === calendarKey(b);
+}
+
+/**
+ * Where an offset measured in calendar `from` sits in calendar `to`: the same moment, counted in `to`'s working days.
+ *
+ * Offsets count working days, so adding a holiday changes no offset, only the dates they correspond to. To compare a
+ * forecast made under the new calendar with a baseline made under the old one, the baseline has to be re-expressed:
+ * a baseline delivery at offset 20 (Fri 30 Oct) is offset 19 once a holiday lands before it. The unused part of a
+ * finishing day is preserved, so half-days survive.
+ */
+export function rebaseOffset(offset: number, from: CalendarSpec, to: CalendarSpec): number {
+  if (sameCalendar(from, to)) return offset;
+  const f = new WorkCalendar(from);
+  const t = new WorkCalendar(to);
+  const date = f.dateAtOffset(offset);
+  const unusedOfDay = f.endOffset(date) - offset;
+  return snap(t.endOffsetClamped(date) - unusedOfDay);
+}
+
 /**
  * Maps calendar dates to working-day offsets and back.
  *

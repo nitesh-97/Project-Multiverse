@@ -16,26 +16,27 @@ import type { ProjectService } from '../service';
 import { params, query } from './util';
 
 /**
- * Granular blueprint editing. Before the project starts these are plain edits. Afterwards the DB refuses changes to
- * locked modules (409 LOCKED), and changes to unlocked ones rebuild history under a new plan revision.
+ * Granular blueprint editing, for building a project before it starts. Once the project has started the database
+ * refuses these (409 LOCKED): changes are then recorded as plan edits (modules not started) or events (modules
+ * started), so history shows them.
  */
 export function registerBlueprintRoutes(app: FastifyInstance, svc: ProjectService): void {
   // teams
   app.post('/projects/:id/teams', async (req, reply) => {
     const { id } = params<{ id: string }>(req);
     const body = teamBody.parse(req.body);
-    svc.edit(id, (s) => s.insertTeam(id, body), { replan: false });
+    svc.edit(id, (s) => s.insertTeam(id, body));
     return reply.code(201).send(body);
   });
   app.patch('/projects/:id/teams/:teamId', async (req) => {
     const { id, teamId } = params<{ id: string; teamId: string }>(req);
     const { name } = teamPatch.parse(req.body);
-    if (svc.edit(id, (s) => s.updateTeam(id, teamId, name), { replan: false }) === 0) throw notFound('Team', teamId);
+    if (svc.edit(id, (s) => s.updateTeam(id, teamId, name)) === 0) throw notFound('Team', teamId);
     return { id: teamId, name };
   });
   app.delete('/projects/:id/teams/:teamId', async (req, reply) => {
     const { id, teamId } = params<{ id: string; teamId: string }>(req);
-    if (svc.edit(id, (s) => s.deleteTeam(id, teamId), { replan: false }) === 0) throw notFound('Team', teamId);
+    if (svc.edit(id, (s) => s.deleteTeam(id, teamId)) === 0) throw notFound('Team', teamId);
     return reply.code(204).send();
   });
 
@@ -43,14 +44,14 @@ export function registerBlueprintRoutes(app: FastifyInstance, svc: ProjectServic
   app.post('/projects/:id/capacity', async (req, reply) => {
     const { id } = params<{ id: string }>(req);
     const body = capacityBody.parse(req.body);
-    svc.edit(id, (s) => s.upsertCapacity(id, body), { replan: false });
+    svc.edit(id, (s) => s.upsertCapacity(id, body));
     return reply.code(201).send(body);
   });
   app.delete('/projects/:id/capacity', async (req, reply) => {
     const { id } = params<{ id: string }>(req);
     const { teamId, from } = query(req);
     if (!teamId || !from) throw notFound('Capacity row', `${teamId ?? '?'}@${from ?? '?'} (pass ?teamId=&from=)`);
-    if (svc.edit(id, (s) => s.deleteCapacity(id, teamId, from), { replan: false }) === 0) throw notFound('Capacity row', `${teamId}@${from}`);
+    if (svc.edit(id, (s) => s.deleteCapacity(id, teamId, from)) === 0) throw notFound('Capacity row', `${teamId}@${from}`);
     return reply.code(204).send();
   });
 
@@ -111,18 +112,18 @@ export function registerBlueprintRoutes(app: FastifyInstance, svc: ProjectServic
   app.post('/projects/:id/features', async (req, reply) => {
     const { id } = params<{ id: string }>(req);
     const body = featureBody.parse(req.body);
-    svc.edit(id, (s) => s.insertFeature(id, { id: body.id, name: body.name, moduleIds: body.moduleIds, ...(body.sharedTaskId !== undefined ? { sharedTaskId: body.sharedTaskId } : {}) }), { replan: false });
+    svc.edit(id, (s) => s.insertFeature(id, { id: body.id, name: body.name, moduleIds: body.moduleIds, ...(body.sharedTaskId !== undefined ? { sharedTaskId: body.sharedTaskId } : {}) }));
     return reply.code(201).send(body);
   });
   app.patch('/projects/:id/features/:featureId', async (req) => {
     const { id, featureId } = params<{ id: string; featureId: string }>(req);
     const patch = featurePatch.parse(req.body);
-    if (svc.edit(id, (s) => s.updateFeature(id, featureId, patch), { replan: false }) === 0) throw notFound('Feature', featureId);
+    if (svc.edit(id, (s) => s.updateFeature(id, featureId, patch)) === 0) throw notFound('Feature', featureId);
     return svc.projectView(id).features.find((f) => f.id === featureId);
   });
   app.delete('/projects/:id/features/:featureId', async (req, reply) => {
     const { id, featureId } = params<{ id: string; featureId: string }>(req);
-    if (svc.edit(id, (s) => s.deleteFeature(id, featureId), { replan: false }) === 0) throw notFound('Feature', featureId);
+    if (svc.edit(id, (s) => s.deleteFeature(id, featureId)) === 0) throw notFound('Feature', featureId);
     return reply.code(204).send();
   });
 }

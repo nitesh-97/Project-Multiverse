@@ -1,20 +1,21 @@
 export * from './types';
 export * from './events';
 export { PlanError, EffectError } from './errors';
-export { WorkCalendar, isISODate } from './calendar';
+export { WorkCalendar, isISODate, rebaseOffset, sameCalendar } from './calendar';
+export { slackToTarget } from './target';
 export { CapacityModel } from './capacity';
 export { topologicalOrder } from './graph';
 export { validatePlan } from './plan';
 export { schedule } from './schedule';
 export type { ModuleSchedule, Schedule, ScheduledTask, TaskState } from './schedule';
 export { applyEffects, hasStarted, isFinished } from './effects';
-export type { EffectResult } from './effects';
+export type { ApplyOptions, EffectResult } from './effects';
 export { carryForward } from './carry';
 export { ENGINE_VERSION } from './snapshot';
 export type { DatedOffset, ForecastSnapshot, MilestoneForecast, ModuleForecast, SnapshotKind } from './snapshot';
-export { buildHistory, recordEvent, startProject, voidEvent } from './history';
-export type { ProjectState } from './history';
-export { explainSnapshot, previewEvent } from './explain';
+export { buildHistory, recordEvent, recordPlanEdit, startProject, voidEvent } from './history';
+export type { ActiveEntry, ProjectState } from './history';
+export { explainSnapshot, previewEvent, previewPlanEdit } from './explain';
 export type { ChangeExplanation, ModuleChange, TaskChange } from './explain';
 export { findAdvisories } from './advisories';
 export type { Advisory, AdvisoryOptions, AdvisoryRule } from './advisories';
@@ -24,6 +25,7 @@ export {
   DEFAULT_CATEGORY_RULES,
   FALLBACK_CATEGORY,
   PHASE_ORDER,
+  PLANNING,
   UNEXPLAINED,
   attributeDelay,
   categorizeEvent,

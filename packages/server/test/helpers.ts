@@ -64,6 +64,55 @@ export const t3 = () => ({ ...base, id: 't3', type: 'DEPENDENCY_DELAY', title: '
 /** M3 Dev +3: delivery moves to Tue 3 Nov and the critical path switches to M3. */
 export const t4 = () => ({ ...base, id: 't4', type: 'TASK_DELAY', title: 'M3 dev +3', occurredAt: '2026-10-14', effects: [{ op: 'ADJUST_ESTIMATE', taskId: 'm3.dev', delta: 3 }] });
 
+/** M7 development 5 -> 8 days, as a recorded plan edit. Made on 6 Oct, before M7's work has started. */
+export const planEdit = (over: Record<string, unknown> = {}) => ({
+  id: 'longer-m7',
+  title: 'M7 development re-estimated',
+  reason: 'new scope agreed with the client',
+  createdBy: 'planner',
+  asOf: '2026-10-06',
+  effects: [{ op: 'ADJUST_ESTIMATE', taskId: 'm7.dev', delta: 3 }],
+  ...over,
+});
+
+/** A project where every module is locked except M7, so M7's plan can still be refined. */
+export async function makeDraftApp(): Promise<TestApp> {
+  const app = makeApp();
+  seedThriveni(app.service, 'thriveni', { leaveUnlocked: ['m7'] });
+  return app;
+}
+
+/** The extinguisher as the team experienced it: ONE shared 2-day effort between client changes and integration. */
+export const sharedExt = (over: Record<string, unknown> = {}) => ({
+  ...base,
+  id: 'ext',
+  type: 'SCOPE_CHANGE',
+  title: 'Extinguisher system',
+  occurredAt: '2026-10-14',
+  linkedFeatureId: 'extinguisher',
+  effects: [
+    {
+      op: 'ADD_TASK',
+      task: { id: 'proj.ext', moduleId: 'project', teamId: 'dev', kind: 'TASK', name: 'Extinguisher system', estimate: 2, featureId: 'extinguisher' },
+      dependsOn: ['proj.chg.dev'],
+      blocks: ['proj.integration'],
+    },
+  ],
+  ...over,
+});
+
+/** A public holiday added mid-project. */
+export const holidayEvent = (date = '2026-10-28', over: Record<string, unknown> = {}) => ({
+  ...base,
+  id: 'hol',
+  type: 'RESOURCE_CHANGE',
+  title: `Holiday ${date}`,
+  occurredAt: '2026-10-14',
+  effects: [{ op: 'ADD_HOLIDAY', date }],
+  ...over,
+});
+
+/** The per-module version of the extinguisher: seven 2-day tasks, one in each module (14 effort-days, +2 schedule). */
 export const extinguisherEffects = () =>
   [1, 2, 3, 4, 5, 6, 7].map((n) => ({
     op: 'ADD_TASK',

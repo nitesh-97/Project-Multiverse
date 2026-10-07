@@ -2,7 +2,7 @@ import { EffectError } from './errors';
 import { PHASES } from './events';
 import type { Event, LogEntry, Phase } from './events';
 import { buildHistory } from './history';
-import type { ProjectState } from './history';
+import type { ActiveEntry, ProjectState } from './history';
 import type { ForecastSnapshot } from './snapshot';
 import type { Plan, WorkDays } from './types';
 import { tidy } from './util';
@@ -11,12 +11,15 @@ import { tidy } from './util';
 // Strategies: how the project's total delay is divided between events (DESIGN.md §3.7).
 // ---------------------------------------------------------------------------------------------------------------
 
-/** One event's share of the delay, before it has been given a category. */
+/** One entry's share of the delay, before it has been given a category. */
 export interface RawContribution {
+  /** The id of the event, or of the plan edit. */
   eventId: string;
-  /** Working days of schedule variance attributed to the event. Negative for events that recovered time. */
+  /** Optional: the engine works it out from the id. Strategies can leave it out. */
+  kind?: 'EVENT' | 'PLAN';
+  /** Working days of schedule variance attributed to the entry. Negative for entries that recovered time. */
   days: WorkDays;
-  /** Effort the event added (+) or removed (-). Reported alongside, because it is not the same thing as days. */
+  /** Effort the entry added (+) or removed (-). Reported alongside, because it is not the same thing as days. */
   effortDays: WorkDays;
 }
 
@@ -30,7 +33,8 @@ export interface StrategyResult {
 }
 
 export interface AttributionInput {
-  baseline: Plan;
+  /** The plan at the start of the project: history is replayed from here. */
+  origin: Plan;
   /** The full log in recorded order, including voids. */
   log: readonly LogEntry[];
   /** Where the log leads. */
@@ -43,58 +47,62 @@ export interface AttributionStrategy {
   attribute(input: AttributionInput): StrategyResult;
 }
 
-const eventLog = (events: readonly Event[]): LogEntry[] => events.map((event) => ({ kind: 'EVENT', event }));
 const finalSnapshot = (s: ProjectState): ForecastSnapshot => s.snapshots[s.snapshots.length - 1] as ForecastSnapshot;
+const idOf = (entry: ActiveEntry): string => (entry.kind === 'EVENT' ? entry.event.id : entry.edit.id);
 
 /**
- * v1. Replays the active events in recorded order; each event gets the change in project variance it caused.
- * The steps telescope, so the shares add up exactly to the total with no interaction left over.
+ * v1. Replays the active entries (events and plan edits) in recorded order; each gets the change in project variance
+ * it caused. The steps telescope, so the shares add up exactly to the total with no interaction left over.
  * Simple and auditable. Its weakness is order dependence: when two events overlap on the critical path, the one
  * recorded first takes the credit or blame for the days they share.
  *
- * It replays only the active events (a voided event is skipped entirely) rather than reading stored snapshots,
+ * Plan edits take part because they are steps in the history. A plan edit that lengthens an unstarted module's plan
+ * can absorb an earlier slip, and shows as a negative share, so the shares still add up.
+ *
+ * It replays only the active entries (a voided event is skipped entirely) rather than reading stored snapshots,
  * so voids never distort the shares.
  */
 export const sequentialStrategy: AttributionStrategy = {
   name: 'sequential',
-  attribute({ baseline, state }) {
-    const replay = buildHistory(baseline, eventLog(state.activeEvents));
-    const contributions = state.activeEvents.map((event, i): RawContribution => {
+  attribute({ origin, state }) {
+    const replay = buildHistory(origin, state.activeEntries);
+    const contributions = state.activeEntries.map((entry, i): RawContribution => {
       const snapshot = replay.snapshots[i + 1] as ForecastSnapshot;
-      return { eventId: event.id, days: snapshot.stepDays, effortDays: snapshot.effortImpact };
+      return { eventId: idOf(entry), kind: entry.kind, days: snapshot.stepDays, effortDays: snapshot.effortImpact };
     });
     return { contributions, interaction: 0 };
   },
 };
 
 /**
- * v2. Removes each event in turn, replays, and reports how much sooner the project would have finished without it
- * (its marginal contribution). Marginals do not generally add up to the total, because events that overlap hide
- * each other; the shortfall is reported as `interaction` rather than being handed to whichever event came first.
- * If other events cannot exist without the removed one (they build on its tasks), those are removed with it.
+ * v2. Removes each entry in turn, replays, and reports how much sooner the project would have finished without it
+ * (its marginal contribution). Marginals do not generally add up to the total, because entries that overlap hide
+ * each other; the shortfall is reported as `interaction` rather than being handed to whichever came first.
+ * If other entries cannot exist without the removed one (they build on its tasks), those are removed with it.
  */
 export const counterfactualStrategy: AttributionStrategy = {
   name: 'counterfactual',
-  attribute({ baseline, state }) {
-    const events = state.activeEvents;
-    const full = buildHistory(baseline, eventLog(events));
+  attribute({ origin, state }) {
+    const entries = state.activeEntries;
+    const full = buildHistory(origin, entries);
     const total = finalSnapshot(full).variance;
 
-    const contributions = events.map((event, i): RawContribution => {
-      const dropped = new Set([event.id]);
+    const contributions = entries.map((entry, i): RawContribution => {
+      const dropped = new Set([idOf(entry)]);
       let without: ProjectState | null = null;
       while (without === null) {
         try {
-          without = buildHistory(baseline, eventLog(events.filter((e) => !dropped.has(e.id))));
+          without = buildHistory(origin, entries.filter((e) => !dropped.has(idOf(e))));
         } catch (e) {
-          // A later event that depended on the removed one can no longer be applied: remove it as well.
+          // A later entry that depended on the removed one can no longer be applied: remove it as well.
           if (e instanceof EffectError && e.eventId !== null && !dropped.has(e.eventId)) dropped.add(e.eventId);
           else throw e;
         }
       }
       const snapshot = full.snapshots[i + 1] as ForecastSnapshot;
       return {
-        eventId: event.id,
+        eventId: idOf(entry),
+        kind: entry.kind,
         days: tidy(total - finalSnapshot(without).variance),
         effortDays: snapshot.effortImpact,
       };
@@ -120,6 +128,8 @@ export interface CategoryRule {
 
 export const UNEXPLAINED = 'Estimation / unexplained variance';
 export const FALLBACK_CATEGORY = 'Other';
+/** Plan edits (refining a module that had not started) are not events, so they are not classified by rule. */
+export const PLANNING = 'Planning changes';
 
 /**
  * v1 rules, using the event's `phase` as the signal for "late". Scope raised once development has started is late
@@ -164,7 +174,8 @@ export function categorizeEvent(
 // The result
 // ---------------------------------------------------------------------------------------------------------------
 
-export interface Contribution extends RawContribution {
+export interface Contribution extends Omit<RawContribution, 'kind'> {
+  kind: 'EVENT' | 'PLAN';
   category: string;
 }
 
@@ -192,15 +203,15 @@ export interface AttributionOptions {
 }
 
 /**
- * Divides the project's delay between its events. Throws if the strategy's numbers do not add up to the total
- * variance, so a strategy under development cannot silently lose or invent days.
+ * Divides the project's delay between its events and plan edits. Throws if the strategy's numbers do not add up to
+ * the total variance, so a strategy under development cannot silently lose or invent days.
  */
 export function attributeDelay(state: ProjectState, options: AttributionOptions = {}): Attribution {
   const strategy = options.strategy ?? sequentialStrategy;
   const rules = options.rules ?? DEFAULT_CATEGORY_RULES;
   const totalVariance = finalSnapshot(state).variance;
 
-  const { contributions: raw, interaction } = strategy.attribute({ baseline: state.baseline, log: state.log, state });
+  const { contributions: raw, interaction } = strategy.attribute({ origin: state.origin, log: state.log, state });
 
   const attributed = raw.reduce((sum, c) => sum + c.days, 0) + interaction;
   if (Math.abs(attributed - totalVariance) > 1e-6) {
@@ -211,9 +222,11 @@ export function attributeDelay(state: ProjectState, options: AttributionOptions 
 
   const events = state.activeEvents;
   const byId = new Map(events.map((e) => [e.id, e]));
+  const planEditIds = new Set(state.activeEntries.flatMap((e) => (e.kind === 'PLAN' ? [e.edit.id] : [])));
   const contributions = raw.map((c): Contribution => {
+    if (planEditIds.has(c.eventId)) return { ...c, kind: 'PLAN', category: PLANNING };
     const event = byId.get(c.eventId);
-    return { ...c, category: event ? categorizeEvent(event, events, rules) : FALLBACK_CATEGORY };
+    return { ...c, kind: 'EVENT', category: event ? categorizeEvent(event, events, rules) : FALLBACK_CATEGORY };
   });
 
   const totals = new Map<string, CategoryTotal>();

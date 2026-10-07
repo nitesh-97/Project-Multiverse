@@ -1,9 +1,9 @@
-import { EPS, snap } from './calendar';
-import { recordEvent } from './history';
+import { EPS, rebaseOffset, snap } from './calendar';
+import { recordEvent, recordPlanEdit } from './history';
 import type { ProjectState } from './history';
-import type { Event } from './events';
+import type { Event, PlanEdit } from './events';
 import type { ForecastSnapshot, SnapshotKind } from './snapshot';
-import type { ISODate, ModuleId, TaskId, WorkDays } from './types';
+import type { CalendarSpec, ISODate, ModuleId, TaskId, WorkDays } from './types';
 
 export interface ModuleChange {
   moduleId: ModuleId;
@@ -40,7 +40,13 @@ export interface ChangeExplanation {
   revision: number;
   kind: SnapshotKind;
   eventId: string | null;
+  /** The plan edit that caused this step (kind PLAN). */
+  planEditId: string | null;
   asOf: ISODate | null;
+  /** How far the plan itself moved at this step: non-zero only when a planning change refined the baseline. */
+  baselineStepDays: WorkDays;
+  /** Modules that use the feature the trigger is about: affected, though not necessarily changed. */
+  linkedModuleIds: ModuleId[];
   delivery: { before: ISODate; after: ISODate };
   /** Variance from baseline before and after, and the difference: the schedule impact of the trigger. */
   varianceBefore: WorkDays;
@@ -126,20 +132,20 @@ export function explainSnapshot(previous: ForecastSnapshot, next: ForecastSnapsh
   }
   modules.sort((a, b) => (a.origin === b.origin ? a.moduleId.localeCompare(b.moduleId) : a.origin === 'DIRECT' ? -1 : 1));
 
+  // A holiday changes no offset, only the dates they fall on. To see what moved, the earlier position is
+  // re-expressed in the calendar of the later snapshot (snapshots from before calendars were recorded are treated as equal).
+  const earlierCalendar = (previous.calendar as CalendarSpec | undefined) ?? next.calendar;
   const tasks: TaskChange[] = [];
   for (const [id, after] of Object.entries(next.tasks)) {
     const before = previous.tasks[id];
     if (!before) {
       tasks.push({ taskId: id, moduleId: after.moduleId, change: 'ADDED', finishBefore: null, finishAfter: after.finishDate, finishDelta: 0 });
-    } else if (Math.abs(after.finish - before.finish) > EPS) {
-      tasks.push({
-        taskId: id,
-        moduleId: after.moduleId,
-        change: 'MOVED',
-        finishBefore: before.finishDate,
-        finishAfter: after.finishDate,
-        finishDelta: snap(after.finish - before.finish),
-      });
+      continue;
+    }
+    const finishDelta = snap(after.finish - rebaseOffset(before.finish, earlierCalendar, next.calendar));
+    const startDelta = snap(after.start - rebaseOffset(before.start, earlierCalendar, next.calendar));
+    if (Math.abs(finishDelta) > EPS || Math.abs(startDelta) > EPS) {
+      tasks.push({ taskId: id, moduleId: after.moduleId, change: 'MOVED', finishBefore: before.finishDate, finishAfter: after.finishDate, finishDelta });
     }
   }
   for (const [id, before] of Object.entries(previous.tasks)) {
@@ -157,7 +163,10 @@ export function explainSnapshot(previous: ForecastSnapshot, next: ForecastSnapsh
     revision: next.revision,
     kind: next.kind,
     eventId: next.eventId,
+    planEditId: next.planEditId ?? null,
     asOf: next.asOf,
+    baselineStepDays: next.baselineStepDays ?? 0,
+    linkedModuleIds: [...(next.linkedModuleIds ?? [])],
     delivery: { before: previous.forecastDelivery.date, after: next.forecastDelivery.date },
     varianceBefore: previous.variance,
     varianceAfter: next.variance,
@@ -179,6 +188,13 @@ export function explainSnapshot(previous: ForecastSnapshot, next: ForecastSnapsh
  */
 export function previewEvent(state: ProjectState, event: Event): ChangeExplanation {
   const next = recordEvent(state, event);
+  const previous = state.snapshots[state.snapshots.length - 1] as ForecastSnapshot;
+  return explainSnapshot(previous, next.snapshots[next.snapshots.length - 1] as ForecastSnapshot);
+}
+
+/** What would this planning change do? Same answer shape as {@link previewEvent}; nothing is persisted. */
+export function previewPlanEdit(state: ProjectState, edit: PlanEdit): ChangeExplanation {
+  const next = recordPlanEdit(state, edit);
   const previous = state.snapshots[state.snapshots.length - 1] as ForecastSnapshot;
   return explainSnapshot(previous, next.snapshots[next.snapshots.length - 1] as ForecastSnapshot);
 }

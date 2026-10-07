@@ -9,6 +9,7 @@ import type {
   Module,
   ModuleKind,
   Plan,
+  PlanEdit,
   Task,
   Team,
   VoidEntry,
@@ -45,6 +46,12 @@ export interface EventRecord extends Event {
 }
 
 export interface VoidRecord extends VoidEntry {
+  seq: number;
+  recordedAt: string;
+}
+
+/** A plan edit as stored: where it sits in the log, and when it was recorded. */
+export interface PlanEditRecord extends PlanEdit {
   seq: number;
   recordedAt: string;
 }
@@ -347,11 +354,14 @@ export class Store {
 
   // ---------------------------------------------------------------------------------------------- log
 
-  /** The next position in the project's log, shared by events and voids. */
+  /** The next position in the project's log, shared by events, plan edits and voids. */
   nextSeq(pid: string): number {
     const r = this.get(
-      `SELECT MAX(seq) AS m FROM (SELECT seq FROM events WHERE project_id = ? UNION ALL SELECT seq FROM event_voids WHERE project_id = ?)`,
-      pid, pid,
+      `SELECT MAX(seq) AS m FROM (
+         SELECT seq FROM events WHERE project_id = ?
+         UNION ALL SELECT seq FROM plan_edits WHERE project_id = ?
+         UNION ALL SELECT seq FROM event_voids WHERE project_id = ?)`,
+      pid, pid, pid,
     );
     return ((r?.m as number | null) ?? 0) + 1;
   }
@@ -359,8 +369,33 @@ export class Store {
   idInUse(pid: string, id: string): boolean {
     return (
       this.get('SELECT 1 AS x FROM events WHERE project_id = ? AND id = ?', pid, id) !== undefined ||
+      this.get('SELECT 1 AS x FROM plan_edits WHERE project_id = ? AND id = ?', pid, id) !== undefined ||
       this.get('SELECT 1 AS x FROM event_voids WHERE project_id = ? AND id = ?', pid, id) !== undefined
     );
+  }
+
+  insertPlanEdit(pid: string, seq: number, recordedAt: string, e: PlanEdit): void {
+    this.run(
+      'INSERT INTO plan_edits (project_id, id, seq, title, reason, created_by, as_of, recorded_at, effects_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      pid, e.id, seq, e.title, nul(e.reason), e.createdBy, e.asOf, recordedAt, JSON.stringify(e.effects),
+    );
+  }
+
+  listPlanEdits(pid: string): PlanEditRecord[] {
+    return this.all('SELECT * FROM plan_edits WHERE project_id = ? ORDER BY seq', pid).map((r) => {
+      const edit: PlanEditRecord = {
+        id: str(r.id),
+        title: str(r.title),
+        createdBy: str(r.created_by),
+        asOf: str(r.as_of),
+        effects: JSON.parse(str(r.effects_json)) as PlanEdit['effects'],
+        seq: r.seq as number,
+        recordedAt: str(r.recorded_at),
+      };
+      const reason = optStr(r.reason);
+      if (reason !== undefined) edit.reason = reason;
+      return edit;
+    });
   }
 
   insertEvent(pid: string, seq: number, recordedAt: string, e: Event): void {
@@ -425,6 +460,10 @@ export class Store {
     const entries: Array<{ seq: number; entry: LogEntry }> = [];
     for (const r of this.all('SELECT * FROM events WHERE project_id = ?', pid)) {
       entries.push({ seq: r.seq as number, entry: { kind: 'EVENT', event: this.toEvent(r) } });
+    }
+    for (const p of this.listPlanEdits(pid)) {
+      const { seq: _seq, recordedAt: _at, ...edit } = p;
+      entries.push({ seq: p.seq, entry: { kind: 'PLAN', edit } });
     }
     for (const v of this.listVoids(pid)) {
       const { seq: _seq, recordedAt: _at, ...entry } = v;

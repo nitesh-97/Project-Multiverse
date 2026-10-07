@@ -36,7 +36,12 @@ describe('the original line', () => {
     expect(tl.original.delivery).toEqual({ offset: 20, date: '2026-10-30' });
     expect(tl.branches).toEqual([]);
     expect(tl.markers).toEqual([]);
-    expect(tl.current).toEqual({ delivery: { offset: 20, date: '2026-10-30' }, variance: 0, asOf: null });
+    expect(tl.current).toEqual({
+      delivery: { offset: 20, date: '2026-10-30' },
+      planDelivery: { offset: 20, date: '2026-10-30' },
+      variance: 0,
+      asOf: null,
+    });
   });
 
   it('lists every module and milestone as originally planned', () => {

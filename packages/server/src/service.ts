@@ -12,8 +12,11 @@ import {
   forecastDrift,
   milestoneHistory,
   previewEvent as enginePreview,
+  previewPlanEdit as enginePreviewPlan,
   recordEvent as engineRecord,
+  recordPlanEdit as engineRecordPlan,
   sequentialStrategy,
+  slackToTarget,
   startProject,
   voidEvent as engineVoid,
 } from '@multiverse/engine';
@@ -21,8 +24,11 @@ import type {
   Advisory,
   Attribution,
   ChangeExplanation,
+  Effect,
   Event,
   ForecastSnapshot,
+  Plan,
+  PlanEdit,
   ProjectState,
   VoidEntry,
 } from '@multiverse/engine';
@@ -30,10 +36,9 @@ import { transaction } from './db/database';
 import type { Db } from './db/database';
 import { ApiError, badRequest, conflict, notFound } from './errors';
 import { asEffects } from './schemas';
-import type { EventInput } from './schemas';
+import type { EventInput, PlanEditInput } from './schemas';
 import { Store } from './store';
-import type { EventRecord, ModuleRecord, ProjectRecord } from './store';
-import type { Plan } from '@multiverse/engine';
+import type { EventRecord, ModuleRecord, PlanEditRecord, ProjectRecord } from './store';
 
 export interface ServiceOptions {
   /** ISO timestamp for "now". Injected so tests are deterministic. */
@@ -51,6 +56,13 @@ export interface BlueprintValidation {
   issues: string[];
 }
 
+/** The forecast against the date promised to the client. */
+export interface TargetStatus {
+  date: string;
+  /** Working days to spare (positive) or late (negative) against that date. */
+  daysToSpare: number;
+}
+
 /** A snapshot without the per-task detail: enough to chart a forecast. */
 export interface SnapshotSummary {
   revision: number;
@@ -64,6 +76,47 @@ export interface SnapshotSummary {
   stepDays: number;
   effortImpact: number;
   engineVersion: string;
+}
+
+/** An engine advisory, or one only the server can raise because it needs to know which modules are locked. */
+export interface ProjectAdvisory extends Omit<Advisory, 'rule'> {
+  rule: Advisory['rule'] | 'MODULE_STARTED_NOT_LOCKED';
+}
+
+/**
+ * The modules whose own work an entry changes directly, which is where its tasks live. With `includeBlocks`, also the
+ * modules of tasks that new work is made to wait for: a planning change may not delay work that has started.
+ */
+function modulesTouched(effects: readonly Effect[], plan: Plan, includeBlocks: boolean): Set<string> {
+  const moduleOf = new Map(plan.tasks.map((t) => [t.id, t.moduleId]));
+  const touched = new Set<string>();
+  const add = (taskId: string): void => {
+    const m = moduleOf.get(taskId);
+    if (m !== undefined) touched.add(m);
+  };
+  for (const e of effects) {
+    switch (e.op) {
+      case 'ADD_TASK':
+        moduleOf.set(e.task.id, e.task.moduleId);
+        touched.add(e.task.moduleId);
+        if (includeBlocks) e.blocks.forEach(add);
+        break;
+      case 'ADJUST_ESTIMATE':
+      case 'REMOVE_TASK':
+      case 'BLOCK_UNTIL':
+      case 'RECORD_PROGRESS':
+      case 'TRANSFER_OWNER':
+        add(e.taskId);
+        break;
+      case 'ADD_DEPENDENCY':
+      case 'REMOVE_DEPENDENCY':
+        add(e.successorId);
+        break;
+      default:
+        break; // SET_CAPACITY and ADD_HOLIDAY belong to no module
+    }
+  }
+  return touched;
 }
 
 const STRATEGIES = { sequential: sequentialStrategy, counterfactual: counterfactualStrategy } as const;
@@ -165,7 +218,19 @@ export class ProjectService {
       tasks: this.store.listTasks(id),
       dependencies: this.store.listDependencies(id),
       features: this.store.listFeatures(id),
-      forecast: latest ? summarize(latest) : null,
+      forecast: latest ? { ...summarize(latest), target: this.targetOf(project, latest) } : null,
+    };
+  }
+
+  /**
+   * How the forecast compares with the date promised to the client, in working days: positive is days to spare,
+   * negative is late. Separate from variance, which compares the forecast with the plan.
+   */
+  private targetOf(project: ProjectRecord, snapshot: ForecastSnapshot): TargetStatus | null {
+    if (project.targetDate === null) return null;
+    return {
+      date: project.targetDate,
+      daysToSpare: slackToTarget(snapshot.calendar ?? { startDate: project.startDate, weekendDays: project.weekendDays, holidays: project.holidays }, snapshot.forecastDelivery.offset, project.targetDate),
     };
   }
 
@@ -184,26 +249,12 @@ export class ProjectService {
   // ---------------------------------------------------------------------------------------------- blueprint
 
   /**
-   * Runs a blueprint edit atomically. If the project has already started, the edit is a planning change to a
-   * module that is not locked yet: history is rebuilt under a new plan revision, and the edit is refused if an
-   * existing event could no longer be applied.
+   * Runs a blueprint edit atomically. Before the project starts these are plain edits. Afterwards the database
+   * refuses to change the plan rows (409 LOCKED): later changes are recorded as plan edits or events, so that history
+   * shows them. Nothing is rebuilt.
    */
-  edit<T>(projectId: string, mutate: (store: Store, project: ProjectRecord) => T, options: { replan?: boolean } = {}): T {
-    return transaction(this.db, () => {
-      const project = this.requireProject(projectId);
-      const result = mutate(this.store, project);
-      if ((options.replan ?? true) && project.startedAt !== null) {
-        try {
-          this.rematerialize(projectId);
-        } catch (e) {
-          if (e instanceof PlanError || e instanceof EffectError) {
-            throw conflict('EDIT_BREAKS_HISTORY', `This change would invalidate the project's history, so nothing was changed. ${e.message}`);
-          }
-          throw e;
-        }
-      }
-      return result;
-    });
+  edit<T>(projectId: string, mutate: (store: Store, project: ProjectRecord) => T): T {
+    return transaction(this.db, () => mutate(this.store, this.requireProject(projectId)));
   }
 
   /** Replaces the whole draft blueprint. Only before the project has started. */
@@ -289,17 +340,25 @@ export class ProjectService {
 
   /**
    * Writes the whole history under a new plan revision, using the engine as it is now. Nothing is updated or
-   * deleted: earlier revisions stay. Used when a planning edit changes the baseline, and to adopt a newer engine.
+   * deleted: earlier revisions stay. Used when the project starts (revision 1) and to adopt a newer engine.
+   * Planning changes do not use it: they are plan edits in the log.
    */
   private rematerialize(projectId: string): number {
     const project = this.requireProject(projectId);
     const state = buildHistory(this.store.loadPlan(project), this.store.loadLog(projectId));
     const events = new Map(this.store.listEvents(projectId).map((e) => [e.id, e.recordedAt]));
+    const plans = new Map(this.store.listPlanEdits(projectId).map((p) => [p.id, p.recordedAt]));
     const voids = new Map(this.store.listVoids(projectId).map((v) => [v.id, v.recordedAt]));
     const planRevision = project.planRevision + 1;
     for (const s of state.snapshots) {
       const recordedAt =
-        (s.kind === 'BASELINE' ? project.startedAt : s.kind === 'VOID' ? voids.get(s.voidId ?? '') : events.get(s.eventId ?? '')) ?? this.now();
+        (s.kind === 'BASELINE'
+          ? project.startedAt
+          : s.kind === 'VOID'
+            ? voids.get(s.voidId ?? '')
+            : s.kind === 'PLAN'
+              ? plans.get(s.planEditId ?? '')
+              : events.get(s.eventId ?? '')) ?? this.now();
       this.store.insertSnapshot(projectId, planRevision, s, recordedAt);
     }
     this.store.setPlanRevision(projectId, planRevision);
@@ -338,8 +397,21 @@ export class ProjectService {
     }
     if (issues.length > 0) throw new ApiError(422, 'EVENT_REJECTED', `The event refers to things that do not exist: ${issues.join('; ')}`, issues);
 
+    // An event changes work that is under way. A module that has not started is still being planned: that is a plan
+    // edit, which is recorded too but moves the plan instead of counting as a delay.
+    const lockedAt = new Map(this.store.listModules(projectId).map((m) => [m.id, m.lockedAt]));
+    const notStarted = [...modulesTouched(asEffects(input.effects), state.plan, false)].filter((m) => lockedAt.get(m) === null);
+    if (notStarted.length > 0) {
+      throw new ApiError(
+        422,
+        'EVENT_REJECTED',
+        `Module ${notStarted.join(', ')} ${notStarted.length === 1 ? 'is' : 'are'} not locked, so ${notStarted.length === 1 ? 'its' : 'their'} plan can still be edited. Record this as a plan edit (POST /projects/${projectId}/plan-edits), which is also kept in history, or lock the module first if its work has started.`,
+        notStarted.map((m) => `module ${m} is not locked`),
+      );
+    }
+
     const id = input.id ?? this.newId('evt');
-    if (this.store.idInUse(projectId, id)) throw conflict('ALREADY_EXISTS', `An event or void with id "${id}" already exists`);
+    if (this.store.idInUse(projectId, id)) throw conflict('ALREADY_EXISTS', `An event, plan edit or void with id "${id}" already exists`);
 
     const event: Event = {
       id,
@@ -371,6 +443,68 @@ export class ProjectService {
     }
     return event;
   }
+
+  // ---------------------------------------------------------------------------------------------- plan edits
+
+  /** Fills defaults and checks the edit only touches modules that have not started. */
+  private buildPlanEdit(projectId: string, input: PlanEditInput, state: ProjectState): PlanEdit {
+    const lockedAt = new Map(this.store.listModules(projectId).map((m) => [m.id, m.lockedAt]));
+    const started = [...modulesTouched(input.effects as Effect[], state.baseline, true)].filter((m) => typeof lockedAt.get(m) === 'string');
+    if (started.length > 0) {
+      throw new ApiError(
+        422,
+        'EVENT_REJECTED',
+        `Module ${started.join(', ')} ${started.length === 1 ? 'is' : 'are'} locked: its work has started, so changes to it are events, not planning. Record this as an event (POST /projects/${projectId}/events).`,
+        started.map((m) => `module ${m} is locked`),
+      );
+    }
+    const id = input.id ?? this.newId('plan');
+    if (this.store.idInUse(projectId, id)) throw conflict('ALREADY_EXISTS', `An event, plan edit or void with id "${id}" already exists`);
+    return {
+      id,
+      title: input.title,
+      ...(input.reason !== undefined ? { reason: input.reason } : {}),
+      createdBy: input.createdBy,
+      asOf: input.asOf,
+      effects: input.effects as PlanEdit['effects'],
+    };
+  }
+
+  /** What would this planning change do? Nothing is written. */
+  previewPlanEdit(projectId: string, input: PlanEditInput): { planEdit: PlanEdit; explanation: ChangeExplanation } {
+    this.requireStarted(projectId);
+    const state = this.replay(projectId);
+    const planEdit = this.buildPlanEdit(projectId, input, state);
+    return { planEdit, explanation: enginePreviewPlan(state, planEdit) };
+  }
+
+  /**
+   * Records a planning change to modules that have not started. It is part of the log, so history shows what changed,
+   * when and why. It moves the plan as well as the forecast: planning is not delay.
+   */
+  recordPlanEdit(projectId: string, input: PlanEditInput): { planEdit: PlanEditRecord; snapshot: ForecastSnapshot; explanation: ChangeExplanation } {
+    return transaction(this.db, () => {
+      const project = this.requireStarted(projectId);
+      const state = this.replay(projectId);
+      const planEdit = this.buildPlanEdit(projectId, input, state);
+      const next = engineRecordPlan(state, planEdit); // EffectError -> 422 naming the edit and effect
+
+      const snapshot = last(next.snapshots);
+      const seq = this.store.nextSeq(projectId);
+      const recordedAt = this.now();
+      this.store.insertPlanEdit(projectId, seq, recordedAt, planEdit);
+      this.store.insertSnapshot(projectId, project.planRevision, snapshot, recordedAt);
+
+      return { planEdit: { ...planEdit, seq, recordedAt }, snapshot, explanation: explainSnapshot(last(state.snapshots), snapshot) };
+    });
+  }
+
+  listPlanEdits(projectId: string): PlanEditRecord[] {
+    this.requireProject(projectId);
+    return this.store.listPlanEdits(projectId);
+  }
+
+  // ---------------------------------------------------------------------------------------------- events
 
   /** What would this event do? Nothing is written. */
   previewEvent(projectId: string, input: EventInput): { event: Event; explanation: ChangeExplanation } {
@@ -464,9 +598,11 @@ export class ProjectService {
 
   // ---------------------------------------------------------------------------------------------- views
 
-  forecast(projectId: string): ForecastSnapshot {
-    const { state } = this.stored(projectId);
-    return last(state.snapshots);
+  /** The current forecast, with how it compares with the date promised to the client. */
+  forecast(projectId: string): ForecastSnapshot & { target: TargetStatus | null } {
+    const { project, state } = this.stored(projectId);
+    const latest = last(state.snapshots);
+    return { ...latest, target: this.targetOf(project, latest) };
   }
 
   snapshots(projectId: string, full: boolean): Array<ForecastSnapshot | SnapshotSummary> {
@@ -497,16 +633,45 @@ export class ProjectService {
     return points;
   }
 
-  advisories(projectId: string, commonFeatureMinModules?: number): Advisory[] {
+  /**
+   * Things worth a person's attention: common features nobody has planned a shared implementation for, tasks the
+   * forecast assumes are finished that nobody has confirmed, and modules whose work is forecast under way but which
+   * have not been locked.
+   */
+  advisories(projectId: string, commonFeatureMinModules?: number): ProjectAdvisory[] {
     this.requireStarted(projectId);
     const state = this.replay(projectId);
-    return findAdvisories(state.plan, commonFeatureMinModules === undefined ? {} : { commonFeatureMinModules });
+    const advisories: ProjectAdvisory[] = findAdvisories(state.plan, commonFeatureMinModules === undefined ? {} : { commonFeatureMinModules });
+
+    for (const module of this.store.listModules(projectId)) {
+      if (module.lockedAt !== null) continue;
+      const underWay = state.plan.tasks.filter((t) => t.moduleId === module.id && state.schedule.tasks[t.id]?.state !== 'NOT_STARTED');
+      if (underWay.length === 0) continue;
+      advisories.push({
+        rule: 'MODULE_STARTED_NOT_LOCKED',
+        severity: 'WARNING',
+        moduleId: module.id,
+        message: `Module ${module.id} is not locked, but the forecast has ${underWay.length} of its tasks under way or finished (${underWay.slice(0, 3).map((t) => t.id).join(', ')}${underWay.length > 3 ? ', ...' : ''}).`,
+        recommendation: 'Lock the module so changes to it are recorded as events; plan edits are refused for work that has started.',
+      });
+    }
+    return advisories;
   }
 
   attribution(projectId: string, strategy: string): Attribution {
     this.requireStarted(projectId);
-    if (!(strategy in STRATEGIES)) throw badRequest(`Unknown strategy "${strategy}". Use one of: ${strategyNames.join(', ')}`);
+    if (!(strategy in STRATEGIES)) throw badRequest(`Unknown strategy "${strategy}". Use one of: ${strategyNames.join(', ')}, both`);
     return attributeDelay(this.replay(projectId), { strategy: STRATEGIES[strategy as StrategyName] });
+  }
+
+  /** Both ways of dividing the delay, side by side: what the retrospective shows. */
+  attributionBoth(projectId: string): Record<StrategyName, Attribution> {
+    this.requireStarted(projectId);
+    const state = this.replay(projectId);
+    return {
+      sequential: attributeDelay(state, { strategy: STRATEGIES.sequential }),
+      counterfactual: attributeDelay(state, { strategy: STRATEGIES.counterfactual }),
+    };
   }
 
   /** The baseline plan as the engine sees it, for callers that want to run their own what-ifs. */

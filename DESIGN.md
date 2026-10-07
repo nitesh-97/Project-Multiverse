@@ -109,7 +109,8 @@ type Effect =
   | { op: 'BLOCK_UNTIL';       taskId: TaskId; date: ISODate | null }                   // external dependency / blocker: sets earliest start (replaces any earlier one); null clears
   | { op: 'SET_CAPACITY';      teamId: TeamId; from: ISODate; headcount: number }
   | { op: 'RECORD_PROGRESS';   taskId: TaskId; startedOn?: ISODate | null; remaining?: WorkDays | null; finishedOn?: ISODate | null }
-  | { op: 'TRANSFER_OWNER';    taskId: TaskId; toPersonId: PersonId; contextCost?: WorkDays };  // contextCost becomes added effort
+  | { op: 'TRANSFER_OWNER';    taskId: TaskId; toPersonId: PersonId; contextCost?: WorkDays }   // contextCost becomes added effort
+  | { op: 'ADD_HOLIDAY';       date: ISODate };                                                 // a day nobody works; must be after the status date
 ```
 
 Rules the engine enforces (each failure is an `EffectError` naming the event and the effect):
@@ -118,7 +119,8 @@ Rules the engine enforces (each failure is an `EffectError` naming the event and
 - **Finished work cannot be re-estimated, re-owned or removed.** Rework is a new `ADD_TASK`. `REMOVE_TASK` is rejected once a task has started.
 - **`REMOVE_TASK` reconnects the chain.** Removing `X` from `A → X → B` leaves `A → B`, as if `X` took no time. The delivery milestone cannot be removed.
 - **`SET_CAPACITY` only changes capacity** after the team's planned-headcount date; it cannot redefine the plan.
-- **`RECORD_PROGRESS` merges.** Fields left out are kept, `null` clears one, recording `finishedOn` clears `remaining`, and `remaining` needs a start date.
+- **`RECORD_PROGRESS` merges.** Fields left out are kept, `null` clears one, recording `finishedOn` clears `remaining`, and `remaining` needs a start date. It also **confirms**: it clears the engine's "assumed" mark on the task, and if it says the task finished *later* than the forecast assumed, the work after it is re-derived from the corrected finish (§3.2).
+- **`ADD_HOLIDAY`** only for a future working day: not on or before the status date (history is not rewritten), not a weekend, not an existing holiday. A holiday changes no working-day count, only the dates they fall on, so variance is measured in the *current* calendar (§3.5).
 - **Duplicates and typos fail loudly**: an existing dependency, a missing one being removed, an unknown task, a malformed date.
 - The result must still be a valid plan: no cycles, no dangling references.
 
@@ -127,7 +129,8 @@ Rules the engine enforces (each failure is an `EffectError` naming the event and
 
 ### 2.3 Other conventions
 
-- **The log.** The project history is an ordered log whose entries are either an `EVENT` or a `VOID`. Engine functions take and return this log; persistence assigns each entry a `seq`.
+- **The log.** The project history is an ordered log whose entries are an `EVENT`, a `PLAN` edit or a `VOID`. Engine functions take and return this log; persistence assigns each entry a `seq`. **Every change after the project starts is a log entry**: nothing is edited in place, and nothing is rebuilt silently.
+- **Events vs plan edits.** An *event* is something that happened to work that is under way: it is slippage, and it counts as delay. A *plan edit* (`PlanEdit`) is a planning change to a module that **has not started**: re-estimating, adding or removing work, changing dependencies. It is recorded in the log with who, when and why, but it moves the **baseline** as well as the forecast, because planning is not delay. The rule is per module: once a module is locked its work has started, so changes to it are events; before that they are plan edits. Plan edits may only use `ADD_TASK`, `ADJUST_ESTIMATE`, `REMOVE_TASK`, `ADD_DEPENDENCY`, `REMOVE_DEPENDENCY` and `BLOCK_UNTIL`; capacity, holidays and actuals are always events. A plan edit is refused for work that has already started (even in an unlocked module), and an event is refused for a module that is not locked, with a pointer to the other route.
 - **Corrections.** Events are never edited or deleted. A mistaken event is withdrawn by a `VOID` entry that names it. The plan is rebuilt from the baseline without that event (effects do not always commute, so subtracting is not enough) and a `VOID` snapshot records the change, with negative effort and schedule impact. A void is refused if a later event relied on the one being withdrawn (for example, it adjusted a task the voided event added).
 - **Back-dated events** are allowed. They keep their true `occurredAt`. The snapshot's `asOf` is clamped so it never goes earlier than the previous snapshot's.
 - **Ownership** is a separate append-only table. An `OWNERSHIP_TRANSFER` event writes a row and may add context-transfer effort.
@@ -156,7 +159,9 @@ Snapshot k-1 ─► carry forward to asOf(k) ─► apply event k's effects ─�
 **Carry-forward.** Between events nobody may have recorded progress, so the previous forecast is treated as what happened unless someone says otherwise. Tasks it had finished by the new status date become finished (at its exact offsets), tasks it had started become in progress with the effort left after burning at the team's capacity, and the rest are untouched. A `RECORD_PROGRESS` effect overrides it with the truth.
 Without this, any event with a later status date would silently re-plan every unrecorded task from that date, and the forecast would jump for no reason. It also keeps data entry light: events matter, progress reports are optional. A property test checks that carrying a forecast forward with no other change reproduces it exactly.
 
-**Known limitation.** "On plan unless told otherwise" means forecasts are only as honest as the recorded actuals. A task that is quietly running late but has no `RECORD_PROGRESS` or delay event will still look on time. Surfacing that (for example, a nudge when a task passes its forecast finish without being recorded) is future work.
+**Assumed progress is flagged, not trusted.** "On plan unless told otherwise" means forecasts are only as honest as the recorded actuals, so everything carry-forward assumes is marked `assumed` on the task. A task the forecast has finished that nobody has confirmed becomes an `UNCONFIRMED_COMPLETION` warning (§3.8); recording progress clears the mark and the warning. Carrying on with work someone recorded as started keeps it confirmed; it is only the *finish* that becomes an assumption.
+
+**A recorded actual can contradict an assumption.** If someone records that a task finished later than forecast, the tasks after it cannot have started when the old forecast said. The assumed progress downstream of it (reached only through other assumed tasks; recorded progress is reality and is left alone) is **re-derived** from the corrected finish: each such task starts when its predecessors really finished, or at its assumed start if later, and is then finished, in progress or not started according to where the status date falls. This keeps retroactive recording accurate: if art finished two days ago, development started two days ago, not today. (Resetting to "not started" would be pessimistic by exactly that lag.) Recording how much work is left also overrides an assumed finish.
 
 ### 3.3 Scheduling algorithm (forward / backward pass)
 
@@ -191,11 +196,15 @@ variance           = forecastDelivery − baselineDelivery            (working d
 stepDays           = variance(k) − variance(k−1)                    ← schedule impact of event k
 ```
 
-Storing `baselineDelivery` in each snapshot handles module-level locking. If someone refines an *unlocked* module's plan, both baseline and forecast move together and the variance does not, so planning is never counted as delay.
+`baselineDelivery` is stored in each snapshot because **the plan can move**. A plan edit (§2.3) refines the plan of a module that has not started: the baseline and the forecast both change, so variance does not, and planning is never counted as delay by itself. When it does change variance (a plan that grows enough to absorb an earlier slip), that step is recorded against the plan edit, so the history, the timeline and the attribution all show it. Revision 0 is the *original* plan and never changes; `baselineStepDays` on a snapshot says how far the plan itself moved at that step.
+
+**Variance is measured in the current calendar.** Offsets count working days, so adding a holiday changes no offset, only the dates they fall on. The baseline (made under the old calendar) is therefore re-expressed in today's working days before comparing (`rebaseOffset`): a baseline delivery at offset 20 (Fri 30 Oct) is offset 19 once a holiday lands before it, so a forecast that stays at offset 20 (now Mon 2 Nov) is +1 day late. Each snapshot records the `calendar` it was made under, and the explanation measures task movement the same way, so a holiday shows the tasks after it moving later.
+
+**Two measures of lateness.** *Variance* compares the forecast with the **plan**. *Days to the client date* (`slackToTarget`) compares it with the date **promised to the client**, in working days: positive is days to spare, negative is late. They differ whenever the plan had slack against the promise or has been refined since; both are shown, because "late against the plan" and "late against the client" are different conversations.
 
 The same logic applies per module: each snapshot stores every module's `baselineFinish` and `forecastFinish` (the finish of its last task), which is what the branches in §3.6 are built from.
 
-Revision 0 is created when the first module is locked. A snapshot contains: per-task start/finish/float, per-module and per-milestone baseline vs forecast, the critical path, the trigger event, the effort impact, and an `engineVersion`. Snapshots are append-only (enforced by DB triggers). Because they store *results*, history survives a later change to the algorithm. Variance and step are reported to a millionth of a working day, so numerical noise can never read as a real change (a step of 0.000000001 would otherwise create a phantom branch).
+Revision 0 is created when the first module is locked. A snapshot contains: per-task start/finish/float, per-module and per-milestone baseline vs forecast, the critical path, the trigger (event, plan edit or void), the effort impact, the calendar, the modules a linked feature is used by (`linkedModuleIds`: "affected" without being changed), and an `engineVersion`. Snapshots are append-only (enforced by DB triggers). Because they store *results*, history survives a later change to the algorithm. Variance and step are reported to a millionth of a working day, so numerical noise can never read as a real change (a step of 0.000000001 would otherwise create a phantom branch).
 
 ### 3.6 Multiverse timeline (branches)
 
@@ -215,7 +224,7 @@ interface Branch {
   steps: BranchStep[];
 }
 interface BranchStep {
-  revision: number;  kind: 'EVENT' | 'VOID';  eventId: string;  asOf: ISODate;
+  revision: number;  kind: 'EVENT' | 'PLAN' | 'VOID';  eventId: string;  asOf: ISODate;   // eventId: the event or plan edit
   delta: WorkDays;                 // change in this module's variance at this step
   variance: WorkDays;              // the module's total variance after the step
   finishAfter: DatedOffset;
@@ -226,10 +235,10 @@ interface BranchStep {
   onCriticalPath: boolean;
 }
 interface Timeline {
-  original: { delivery; modules[]; milestones[] };   // the baseline, never changes
-  current:  { delivery; variance; asOf };
+  original: { delivery; modules[]; milestones[] };   // the plan as it was at the start (revision 0), never changes
+  current:  { delivery; planDelivery; variance; asOf };   // planDelivery: the plan as it stands after plan edits
   branches: Branch[];              // in the order modules first deviated
-  markers:  EventMarker[];         // every event and void, including those that moved nothing
+  markers:  EventMarker[];         // every event, plan edit and void, including those that moved nothing
 }
 ```
 
@@ -238,6 +247,8 @@ interface Timeline {
 - **Recovery** (`delta < 0`) bends the branch back toward the original line. At variance 0 it is `MERGED`; if the module deviates again the branch re-opens.
 - **No schedule effect.** An event that adds effort but moves no module's finish creates no branch step. It still shows as an event marker with its effort impact (`noScheduleEffect`).
 - **Voids** add a `VOID` step to every branch the voided event had moved, naming the withdrawn event.
+- **Plan edits** are markers (`kind: PLAN`, with `baselineStepDays`), because refining the plan of an unstarted module moves the plan, not a lane away from it. A branch step appears only if the edit changes a module's variance: for example, lengthening M7's plan can leave the delivery lane *less* late than before, which is a negative step on that lane, caused by the plan edit.
+- **Two lines on the original track.** `original` is the plan as it was when the project started. `current.planDelivery` is the plan as it stands. They coincide until a plan edit moves the plan; the forecast and variance are measured against the second.
 - **`fromModuleIds`** looks upstream on the *new* driving chain for delays, and on the *old* one for recoveries. When M5 finishes early and the critical path switches to M3, the delivery gain is still attributed to M5, not to M3, which did not change.
 - Per-module variance, step and origin are all computed from stored snapshots plus the driving chain, so nothing extra is persisted. `buildTimeline(state)` derives it on demand.
 
@@ -248,9 +259,9 @@ This is the part the owner will tune after trying scenarios, so it has three sep
 ```ts
 interface AttributionStrategy {
   name: string;
-  attribute(input: { baseline: Plan; log: LogEntry[]; state: ProjectState }): {
-    contributions: { eventId; days; effortDays }[];
-    interaction: WorkDays;          // days no single event accounts for
+  attribute(input: { origin: Plan; log: LogEntry[]; state: ProjectState }): {
+    contributions: { eventId; days; effortDays }[];   // eventId: an event's id, or a plan edit's
+    interaction: WorkDays;          // days no single entry accounts for
   };
 }
 attributeDelay(state, { strategy?, rules? }) → { strategy, totalVariance, contributions[], interaction, byCategory[] }
@@ -258,9 +269,9 @@ attributeDelay(state, { strategy?, rules? }) → { strategy, totalVariance, cont
 
 `attributeDelay` throws if `Σ contributions + interaction ≠ total variance`, naming the strategy. A strategy under development fails loudly instead of producing a retro that does not add up.
 
-Both strategies replay only the **active** events (a voided event is skipped entirely), not stored snapshots, so voids never distort the shares.
+Both strategies replay only the **active** entries (a voided event is skipped entirely), from the *origin* plan, not stored snapshots, so voids never distort the shares. **Plan edits are contributors too.** They are steps in the history, and one can change variance: lengthening M7's plan can absorb an earlier M5 slip, which shows as a negative share in category **Planning changes**, so the shares still add up. The retrospective shows **both strategies side by side** (`?strategy=both`).
 
-**`sequential` (default).** Event k's contribution is `stepDays(k)`. This telescopes, so contributions sum *exactly* to the total and `interaction` is always 0. Simple and auditable. Its weakness is order dependence: when two events overlap on the critical path, whichever was recorded first takes the credit or blame.
+**`sequential` (default).** Entry k's contribution is `stepDays(k)`. This telescopes, so contributions sum *exactly* to the total and `interaction` is always 0. Simple and auditable. Its weakness is order dependence: when two events overlap on the critical path, whichever was recorded first takes the credit or blame.
 
 **`counterfactual`.** Remove each event in turn, replay, and report how much sooner the project would have finished without it (its marginal). Marginals do not generally add up, because overlapping events hide each other; the shortfall is reported as `interaction`. If other events build on the removed one's tasks, they are removed with it.
 
@@ -296,8 +307,10 @@ The unexplained bucket matters: without it a task that simply overran would be d
 
 ### 3.8 Advisories (rules, never blockers)
 
-- **Common feature detection** (spec §11): a feature used by ≥ N modules (default 2) with no shared implementation task yields an advisory with the module count and a recommendation. A feature is *used by* a module if it is listed against it (`Feature.moduleIds`) or one of the module's tasks implements it (`Task.featureId`). Only `DELIVERABLE` modules count, because shared and project modules are where shared work lives, not consumers of it. A feature has a shared implementation when `Feature.sharedTaskId` names an existing task.
-- On the Thriveni seed exactly one advisory fires: *"Common feature detected: Extinguisher is used by 7 modules but has no shared implementation task."* Localization, evaluation and the menu each have a shared task and are not flagged.
+- **Common feature detection** (spec §11): a feature used by ≥ N modules (default 2) with no shared implementation task yields an advisory with the module count and a recommendation. A feature is *used by* a module if it is listed against it (`Feature.moduleIds`) or one of the module's tasks implements it (`Task.featureId`). Only `DELIVERABLE` modules count, because shared and project modules are where shared work lives, not consumers of it. A feature has a shared implementation when `Feature.sharedTaskId` names an existing task, **or when any task that implements it sits outside the deliverable modules**: work done once, for everyone. So recording the extinguisher as one shared effort resolves the advisory; implementing it seven times inside the modules does not.
+- **Unconfirmed completion** (`WARNING`): a task the forecast has finished but nobody has recorded (§3.2). One warning per task, earliest forecast finish first, with the date and what to do. Milestones are not flagged. If nobody records anything this is a lot of warnings (17 by day 8 on Thriveni); grouping is a presentation question for the UI.
+- **Module started but not locked** (`WARNING`, raised by the server because it needs to know which modules are locked): an unlocked module with work the forecast has under way or finished. Lock it so changes are recorded as events; plan edits are refused for work that has started.
+- On the Thriveni seed exactly one advisory fires at the start: *"Common feature detected: Extinguisher is used by 7 modules but has no shared implementation task."* Localization, evaluation and the menu each have a shared task and are not flagged.
 - Each advisory is a pure function `(plan) → Advisory[]`; `Plan.features` is optional and never affects the schedule. Definition of Ready and Feature Impact Assessment (spec §10, §12) will be added the same way after the MVP. The columns to hold them are nullable and reserved.
 
 ### 3.9 Derived views
@@ -306,7 +319,8 @@ All computed from stored snapshots; nothing extra is persisted.
 
 - **Forecast drift** (`forecastDrift`) = the delivery forecast at every revision.
 - **Milestone history** (`milestoneHistory`) = one milestone's baseline and forecast at every revision (spec §20).
-- **First breach** (`firstBreach`) = first snapshot where forecast > baseline. This is *recognised* schedule impact. The spec §20 metric "time between first detectable risk and recognized impact" needs a notion of *detectable* risk (for example, float to target shrinking to zero) that is not designed yet.
+- **Days to the client date** (`slackToTarget`) = working days between the forecast and the date promised to the client; computed from the project's target date and the snapshot's calendar, so it is always current and is not stored in snapshots.
+- **First breach** (`firstBreach`) = first snapshot where forecast > plan. This is *recognised* schedule impact. The spec §20 metric "time between first detectable risk and recognized impact" needs a notion of *detectable* risk (for example, float to target shrinking to zero) that is not designed yet.
 - **Progress %** = completed effort ÷ total current effort (effort-weighted, not task-count). Not built yet; part of the Control Room.
 
 ---
@@ -338,6 +352,7 @@ events            (project_id, id, seq, type, category, title, description, phas
                    created_by, source_team_id, affected_team_id, affected_person_id,
                    occurred_at, recorded_at, as_of, parent_event_id, linked_requirement_id, linked_feature_id,
                    could_have_been_earlier, est_effort, est_schedule, actual_effort, actual_schedule, effects_json)
+plan_edits        (project_id, id, seq, title, reason, created_by, as_of, recorded_at, effects_json)   -- seq is shared with events
 event_voids       (project_id, id, seq, event_id, as_of, reason, recorded_at)    -- seq is shared with events
 forecast_snapshots(project_id, plan_revision, revision, kind, event_id, void_id, as_of, recorded_at,
                    baseline_delivery, forecast_delivery, variance_days, step_days, effort_impact,
@@ -349,23 +364,18 @@ forecast_snapshots(project_id, plan_revision, revision, kind, event_id, void_id,
 - A task of a **locked module** cannot be inserted, changed, moved into, or deleted. New work after lock must be an event.
 - A **dependency** whose successor is in a locked module cannot be added or removed.
 - A locked module cannot be changed, unlocked or deleted.
-- Once the **project has started**, its calendar, delivery milestone, teams, capacity and features are frozen. Name and target date stay editable: they are only labels.
-- `events`, `event_voids` and `forecast_snapshots` are **append-only**. Corrections are new rows.
+- **Once the project has started, the plan rows are frozen entirely**: tasks, dependencies, modules (name, kind, scope), teams, capacity, features, and the calendar and delivery milestone. The rows are the plan *as it was at the start*. Every later change is a recorded plan edit or event, never an edit to the rows, so history shows it. The one thing that may still change is locking another module (`locked_at`). Name and target date stay editable: they are only labels.
+- `events`, `event_voids`, `plan_edits` and `forecast_snapshots` are **append-only**. Corrections are new rows.
 
-All trigger messages begin `LOCKED:`, which the API turns into `409`.
+All trigger messages begin `LOCKED:`, which the API turns into `409`, and they say what to do instead.
 
-**What is stored and what is derived.** Stored: the baseline rows, the log (events and voids) and the snapshots as they were recorded. Derived on each request: the engine's current plan, by replaying the log over the baseline. Recording, previewing, attribution and advisories use the replay. History views (forecast, snapshots, timeline) read the stored snapshots, so history shows what was recorded at the time even if the algorithm later changes.
+**What is stored and what is derived.** Stored: the plan rows as they were at the start, the log (events, plan edits and voids, one shared sequence) and the snapshots as they were recorded. Derived on each request: the engine's current plan, by replaying the log over the rows. Recording, previewing, attribution and advisories use the replay. History views (forecast, snapshots, timeline) read the stored snapshots, so history shows what was recorded at the time even if the algorithm later changes.
 
-### Plan revisions: how per-module locking works with one baseline
+### Plan revisions: only for adopting a newer engine
 
-The engine assumes one baseline for the whole history. Per-module locking means modules not yet started can still be refined after others have started. Both hold because of **plan revisions**:
+A plan revision is a complete set of snapshots for a project's history. The first lock writes revision 1. `POST /projects/:id/rebuild-history` writes a new revision using the current engine and keeps the old one, so that history can be re-derived after the algorithm improves; views follow the current revision. Nothing is ever updated or deleted.
 
-- The first lock starts the project and writes the whole history under plan revision 1.
-- A planning edit to an **unlocked** module after that (a task estimate, a dependency, a new module) moves the baseline. The server replays the log over the new baseline and writes a **complete new set of snapshots under revision 2**. Earlier revisions are kept, never updated or deleted, and views follow the current revision.
-- If an existing event could no longer apply (it referred to a task the edit removed), or the edit makes the plan invalid, the edit is refused with `409 EDIT_BREAKS_HISTORY` and **nothing changes**.
-- `POST /projects/:id/rebuild-history` writes a new revision with the current engine, to adopt a newer algorithm. The old revision is kept.
-
-Effect: refining an unlocked module is treated as planning, not delay. If M7 is re-planned from 5 to 8 days of development and that makes the original plan a day longer, the original delivery date moves with it, and an earlier M5 slip stops showing as variance because it is now hidden behind M7's longer plan. Both views remain available.
+Planning changes **do not** create revisions. An earlier design rebuilt history under a new revision whenever an unlocked module was edited, which made the change invisible. They are now plan edits in the log (§2.3), so history shows what changed, when and why.
 
 ---
 
@@ -377,30 +387,32 @@ Run it with `npm start -w @multiverse/server` (default `http://127.0.0.1:4000`).
 |---|---|
 | Health | `GET /health` |
 | Projects | `POST /projects` · `GET /projects` · `GET /projects/:id` · `PATCH /projects/:id` (name, target date; calendar until started) · `PUT /projects/:id/delivery` · `GET /projects/:id/validate` |
-| Blueprint | `PUT /projects/:id/blueprint` (whole plan at once, before start) · `POST/PATCH/DELETE` on `/teams`, `/modules`, `/tasks`, `/features` · `POST /capacity`, `DELETE /capacity?teamId=&from=` · `POST /dependencies`, `DELETE /dependencies/:predecessorId/:successorId` |
-| Locking | `POST /projects/:id/modules/:moduleId/lock` (first lock starts the project and writes revision 0) |
+| Blueprint (before the project starts) | `PUT /projects/:id/blueprint` (whole plan at once) · `POST/PATCH/DELETE` on `/teams`, `/modules`, `/tasks`, `/features` · `POST /capacity`, `DELETE /capacity?teamId=&from=` · `POST /dependencies`, `DELETE /dependencies/:predecessorId/:successorId` |
+| Locking | `POST /projects/:id/modules/:moduleId/lock` (the first lock starts the project and writes revision 0) |
 | Events | `POST /projects/:id/events/preview` · `POST /projects/:id/events` · `GET /projects/:id/events` (filter by `type`, `phase`, `moduleId`, `teamId`, `status`) · `GET /projects/:id/events/:eventId` · `POST /projects/:id/events/:eventId/void` |
-| Views | `GET /projects/:id/forecast` · `/snapshots` (`?full=true`) · `/snapshots/:revision` · `/timeline` · `/history` · `/milestones/:taskId/history` · `/advisories` (`?minModules=`) · `/attribution` (`?strategy=sequential\|counterfactual`) |
+| Plan edits | `POST /projects/:id/plan-edits/preview` · `POST /projects/:id/plan-edits` · `GET /projects/:id/plan-edits` |
+| Views | `GET /projects/:id/forecast` (with `target`: days to spare or late against the client date) · `/snapshots` (`?full=true`) · `/snapshots/:revision` · `/timeline` · `/history` · `/milestones/:taskId/history` · `/advisories` (`?minModules=`) · `/attribution` (`?strategy=sequential\|counterfactual\|both`) |
 | Plan | `GET /projects/:id/plan` · `/plan-revisions` · `POST /projects/:id/rebuild-history` |
 
-`preview` is how the spec's step 6→7 works: the developer says "+2 days", the system answers with the schedule and effort impact, whether it is on the critical path, and the modules affected. It applies exactly the checks recording does and writes nothing.
+`preview` is how the spec's step 6→7 works: the developer says "+2 days", the system answers with the schedule and effort impact, whether it is on the critical path, and the modules affected. It applies exactly the checks recording does and writes nothing. Plan edits have the same preview.
+
+**Which route?** Changes to a module that has **started** (locked) are *events*. Changes to the plan of a module that has **not** started are *plan edits*. Each route refuses the other's modules and says so. Capacity, holidays and actuals are always events.
 
 **Errors** are always `{ error, message, details? }`:
 
 | Status | `error` | Meaning |
 |---|---|---|
-| 400 | `BAD_REQUEST` | Malformed JSON, or a field is missing, misspelled, or invalid (`details` lists each path) |
+| 400 | `BAD_REQUEST` | Malformed JSON, or a field is missing, misspelled, or invalid (`details` lists each path). Also a plan edit that uses an effect planning may not (capacity, holidays, actuals) |
 | 404 | `NOT_FOUND` | No such project, task, event, snapshot or route |
-| 409 | `LOCKED` | The database refused: the module is locked or the project has started |
+| 409 | `LOCKED` | The database refused: the module is locked, or the project has started and its plan rows cannot be edited directly |
 | 409 | `NOT_STARTED` | Lock a module first |
 | 409 | `ALREADY_LOCKED`, `PROJECT_STARTED`, `ALREADY_EXISTS`, `ALREADY_VOIDED`, `REFERENCE` | State conflicts |
-| 409 | `CANNOT_VOID` | A later event relied on the one you are voiding |
-| 409 | `EDIT_BREAKS_HISTORY` | A planning edit would invalidate recorded history; nothing was changed |
+| 409 | `CANNOT_VOID` | A later entry relied on the event you are voiding |
 | 422 | `INVALID_PLAN` | The blueprint is not a valid plan; `details` lists every problem |
-| 422 | `EVENT_REJECTED` | The event cannot be applied, or names things that do not exist; the message names the effect |
+| 422 | `EVENT_REJECTED` | The event or plan edit cannot be applied, or is for the wrong kind of module, or names things that do not exist; the message names the effect |
 | 500 | `INTERNAL` | Unexpected. The body never contains internals; details are in the server log |
 
-**Atomicity.** Every write is one transaction. A rejected event leaves no row behind, and the next event still takes the next number in the log.
+**Atomicity.** Every write is one transaction. A rejected event or plan edit leaves no row behind, and the next entry still takes the next number in the log.
 
 **Security.** There is no authentication: it is a local tool. The server listens on `127.0.0.1` only unless `HOST` is set, so nothing else on the network can reach it. Do not expose it without adding authentication.
 
@@ -438,15 +450,24 @@ Run it with `npm start -w @multiverse/server` (default `http://127.0.0.1:4000`).
 | T2 | M2 Dev **+3d** (float 4) | Effort +3. **M2 branch +3** (Alpha 9 → 12), flagged `absorbed`. Delivery **0**, with 1 day of float left |
 | T3 | M5 Dev **+1d** (critical) | **M5 branch +1** (DIRECT) and **delivery branch +1** (PROPAGATED from M5) → offset 21 = **Mon 2 Nov** (skips the weekend) |
 | T4 | M3 Dev **+3d** (float 1) | **M3 branch +3**; delivery **+2** → offset 22 = **Tue 3 Nov**. Critical path **switches** from M5 to M3. M5 has no branch |
-| HS | Hero (spec §28/§40): LXD feedback means every module needs an *Extinguisher integration* task (Dev, 2d) inserted between its Dev and Alpha tasks; `linkedFeature = Extinguisher` | Effort **+14**, schedule **+2**, because the seven tasks run in parallel. **7 module branches (+2 each)** plus the **delivery branch +2** (PROPAGATED from M5). Critical path **yes** → **Tue 3 Nov**. Original and new forecast both retained |
+| HS | Hero (spec §28/§40): LXD feedback means the **extinguisher system** is needed. It was **one shared 2-day effort**, done between the client changes and integration; `linkedFeature = Extinguisher` | Effort **+2**, schedule **+2**, one lane: the **delivery lane +2** (DIRECT). `linkedModuleIds` = M1–M7 (affected, not changed). Critical path **yes** → **Tue 3 Nov**. The "common feature without a shared task" advisory is **resolved**. Original and new forecast both retained |
+| HS7 | Contrast: the same need met module by module, a 2-day task in each of the 7 modules | Effort **+14**, schedule **+2**, because the seven tasks run in parallel. **7 module branches (+2 each)** plus the delivery branch +2 (PROPAGATED from M5). The advisory is **not** resolved |
 
-HS deliberately models what actually happened on Thriveni: the extinguisher was integrated module by module, so the repeated cost is real. The advisory in §3.8 would have flagged this at planning time. Its **14 effort-days vs 2 schedule-days** is also the clearest demonstration of "effort ≠ schedule impact" (spec §5.4).
+HS is how the team experienced it on Thriveni: built once, for everyone. HS7 is kept as a scenario because it is the clearest demonstration of "effort ≠ schedule impact" (spec §5.4: **14 effort-days vs 2 schedule-days**) and it exercises per-module branches; it is what the cost would have been without a shared implementation. The advisory in §3.8 would have flagged the need at planning time.
 
 > Heads-up: the spec says "Nov 1" for the +2 case. With working-days-only in 2026, 1 Nov is a Sunday, so the demo shows **3 Nov**. This is correct behaviour.
 
 Combined check for attribution: apply T2, then T3, then HS in order. Sequential contributions are `0, +1, +2` and must sum to the final variance of **+3** (offset 23 vs 20 → forecast Wed 4 Nov).
 
 **CAP (capacity).** Event recorded Tue 13 Oct (offset 7): Dev drops from 4 to 2 people from Wed 14 Oct. Every Dev task with work left now takes twice as long: M5 Dev 6d → 12d (ends 19), M3 Dev 5d → 10d (ends 17), client changes 2d → 4d, integration 1d → 2d. So 19 + review 1 + changes 4 + integration 2 + QA 2 + beta 1 = **29**. Expected: effort **0**, schedule **+9** → **Thu 12 Nov**; M1–M7 and the delivery lane all deviate DIRECT (the capacity change touches them), while the Shared module is unaffected because its work finished by day 7. This is the "describe it as a capacity change, not underperformance" case (spec §15).
+
+**HOL (holiday).** Wed 28 Oct is added as a public holiday on Wed 14 Oct. It changes no working-day count, only dates, so delivery stays at offset 20 but is now **Mon 2 Nov**: **+1** (variance measured in the new calendar), caused by a capacity change, DIRECT on the delivery lane. Only the tasks after the holiday (QA, beta, delivery) move. A holiday on a weekend, on the status date or earlier, or one already added is refused.
+
+**PLAN (planning change).** M7 Dev is re-estimated from 5 to 8 days on Tue 6 Oct, before M7's work has started. M7 now takes 14 days to Alpha, longer than M5's 13, so the **plan** moves from Fri 30 Oct to Mon 2 Nov, the forecast moves with it, and variance is **0**: planning, not delay. Revision 0 still says Fri 30 Oct. If M5 had slipped a day on Mon 5 Oct (+1), the edit **absorbs** it: variance goes from +1 to 0, the step is **−1**, and the attribution reads *Dependency delays +1, Planning changes −1*, total 0. Refused: a locked module (that is an event), work that has already started (by 14 Oct M7 development is under way), and any effect that is not planning.
+
+**LATE (a late actual).** Someone records that M5 art finished Thu 15 Oct (offset 9) instead of Tue 13 Oct (7). The development that the forecast had assumed started on the 14th cannot have, so it starts on the 15th: delivery **+2**, Tue 3 Nov. Recorded retroactively on Tue 20 Oct the answer is the same (development has been running since the 15th), not +5, which "starts today" would give. A task recorded as finished *earlier* than forecast changes nothing after it.
+
+**UNCONFIRMED.** By the end of Wed 14 Oct the forecast has 17 tasks finished (14 module tasks, 3 shared) that nobody has recorded. Each is flagged until its progress is recorded; milestones and work merely under way are not.
 
 **Status dates.** T2–T4, HS and CAP are recorded with status dates of 13–14 Oct, when most Dev work is under way, so they exercise carry-forward. A further case, **recovery**, records "M5 Dev finished Fri 16 Oct" (planned for 13 days, done at 10): delivery moves **−1** to Thu 29 Oct and no further, because M3 (12) now sets the pace. The explanation attributes the gain to M5 even though the critical path moved to M3.
 
@@ -468,23 +489,41 @@ Pure-function tests in `packages/engine`, run by Vitest, before any server or UI
 10. **Advisory**: Extinguisher with 7 modules and no shared task is flagged; adding a shared task clears it; thresholds, task-derived links and shared/project modules are covered.
 11. **Branches**: one per deviating module; DIRECT vs PROPAGATED origin and `fromModuleIds`; `absorbed` flag (T2); critical-path switch (T4); recovery and `MERGED`; no branch for a module that never deviates. *(the explanation data for these is tested in step 3; the branch builder itself is step 4)*
 12. **Carry-forward**: jumping to, or stepping through, any status date with no other change reproduces the baseline forecast exactly. Checked on Thriveni, Thriveni with a mid-project Dev cut, and fractional estimates with a 2/3 capacity factor (the worst case for rounding drift).
+13. **Calendar**: `rebaseOffset` (including half-days); a holiday moves dates and variance but no offsets; weekend, past and duplicate holidays refused; a holiday can be voided; variance and the explanation agree.
+14. **Plan edits**: the plan moves and variance does not; a later slip is absorbed with the right signs; voiding an event keeps plan edits; refusals (started work, non-planning effects, work an event added, reused ids); both attribution strategies reconcile with plan edits in the log; replay from the log is identical.
+15. **Late actuals**: recorded finish later than forecast pushes assumed successors (same-day, retroactive, chained); earlier finish changes nothing; recorded work is never overridden; recording "remaining" overrides an assumed finish.
+16. **Unconfirmed work**: flagged, ordered, cleared by recording, stays cleared, never milestones, never changes the forecast.
+17. **Client date and shared feature**: `slackToTarget` in working days and in the current calendar; the extinguisher as one shared task (+2, one lane, `linkedModuleIds`, advisory resolved) against the per-module version (advisory not resolved).
+18. **Server**: raw SQL cannot change plan rows, plan edits or snapshots once the project has started; events on unlocked modules and plan edits on locked ones are refused with a pointer to the right route; stored history equals a fresh engine replay with plan edits in the log; holidays, targets, warnings and `strategy=both` over HTTP.
 
 ---
 
-## 8. Assumptions to confirm
+## 8. Decisions and open questions
 
-Resolved: branches are per deviating module, and capacity ignores contention. Still open:
+### Decided (from testing the first version)
 
-1. **Delivery lane (§3.6).** Post-Alpha tasks and the delivery milestone sit in a `PROJECT` module, so the delivery branch is that module's branch. Delays that originate in a `SHARED` or `PROJECT` task also get a branch of their own. Is that the right granularity?
-2. **Fork position.** A branch leaves the original line at the `asOf` of the first snapshot where the module deviated. The UI might prefer to fork at the module's planned position of the affected task. Both are derivable, so this can be settled when the timeline UI is built.
-3. **Weekend** is Sat + Sun. If the team works alternate Saturdays, the calendar needs a rule for that.
-4. **Variance is measured against the computed baseline**, not against `target_date`. In the seed they coincide. When they differ the Control Room should show both ("2 days of float to target" vs "+3 behind baseline"). This is not designed yet.
-5. **Late-discovery classification** (§3.7) depends on knowing when a module's development started, from `RECORD_PROGRESS` effects. If nobody records progress, the classifier falls back to the event's `phase`.
-6. **Hero scenario differs from the spec's numbers.** The spec says "estimated effort 2 days"; here each of the 7 modules gets a 2-day task (14 effort-days, +2 schedule). You said the numbers are illustrative, so I chose the version that exercises per-module branches.
-7. **"On plan unless told otherwise" (§3.2 carry-forward).** Between events, the engine assumes tasks progress as the previous forecast said. This keeps data entry light but means a quietly late task looks on time until someone records it. Is that the right default for the first trial, or should an unrecorded task past its forecast finish be flagged?
-8. **Refining an unlocked module after the project has started (§4 plan revisions).** The server allows it and rebuilds history under a new plan revision, keeping the old one. The alternative is to forbid any plan edit once the first module is locked, which is simpler but makes per-module locking pointless. Is the revision behaviour what you want?
-9. **Events on unlocked modules.** The engine and server accept an event that touches a module that has not been locked, and carry-forward can mark such a module's tasks as started. That is probably a data-entry mistake (an unlocked module's scope should simply be edited). Should the server refuse or warn?
-10. **No authentication.** Fine for a local tool bound to `127.0.0.1`. Needed before anyone else uses it over a network.
+| Topic | Decision |
+|---|---|
+| Delivery lane | Delays that start in shared work or in the post-Alpha phase get their own line, and delivery is its own line. (As built.) |
+| Calendar | Saturday and Sunday are off. Holidays are added by hand by the PM during the project, as a recorded event (`ADD_HOLIDAY`); a holiday counts as a delay and is attributed to capacity. |
+| Variance | Show both: against the **plan**, and against the **date promised to the client** (days to spare or late). |
+| Attribution | The retrospective shows **both** strategies side by side. |
+| Category labels | The rules and wording are right: a label depends on the event's `type` and `phase`. |
+| Assumed progress | **Flag** a task the forecast has finished that nobody has recorded (`UNCONFIRMED_COMPLETION`). |
+| Changes after the project starts | **Every change is recorded as history.** Planning changes to a module that has not started are *plan edits* in the log (they move the plan, not the delay); changes to a module that has started are events. Nothing is edited in place and nothing is rebuilt silently. |
+| Events on unlocked modules | Refused, with a pointer to plan edits. (The decision was "yes, guard it"; refuse was chosen over warn. Say if you would rather it warned.) A separate warning is raised for an unlocked module whose work is forecast under way. |
+| The extinguisher | It was **one shared effort**, not seven per-module tasks. The hero scenario is now one shared 2-day task; the per-module version is kept as a contrast scenario. Recording shared work resolves the common-feature advisory. |
+| Entering events | For standard cases the UI should offer **buttons and example text** (delay, finished, capacity, holiday, block, plan edit, void). The PowerShell helper's one-line commands are the prototype. |
+| First screen | The **Multiverse timeline** comes first, then the Control Room, then the Retro view. |
+
+### Still open
+
+1. **Fork position.** A branch leaves the original line at the `asOf` of the first snapshot where the module deviated. The UI might prefer to fork at the module's planned position of the affected task. Both are derivable; settle it when the timeline UI is built.
+2. **Late-discovery classification** (§3.7) uses the event's `phase`. If someone picks the wrong phase the label is wrong; whether the engine should second-guess it from recorded progress is open.
+3. **Unconfirmed warnings are many** if nobody records anything (17 by day 8). Grouping by module or showing only the critical path first is a presentation question for the UI.
+4. **A holiday is an event**, so it counts as delay under *Capacity changes*. If the team prefers holidays to appear as planned calendar changes rather than delay, that is a labelling change.
+5. **A plan edit that absorbs a slip** shows as a negative share ("Planning changes −1") in the retro. Confirm this reads the way you want.
+6. **No authentication.** Fine for a local tool bound to `127.0.0.1`. Needed before anyone else uses it over a network.
 
 ---
 
@@ -496,5 +535,6 @@ Follows spec §30. Each step ends in something testable.
 2. **Engine core**: calendar → graph → capacity → forward/backward pass → T1, plus plan-level equivalents of T2–T4. *(done: 59 tests passing)*
 3. **Effects + replay + snapshots + explanation**: T2, T3, T4, HS, CAP, recovery and void all pass through the event log. This is the spec §39 milestone as a test. *(done: 169 tests passing; step 4 below builds on `explainSnapshot`)*
 4. **Attribution + advisories + timeline builder**, with strategy interface. *(done: 242 tests passing)*
-5. **Server + SQLite + seed** and the API from §5, tested with the Thriveni seed. *(done: 89 server tests, plus a manual run of the real seed and server)*
-6. **Multiverse timeline UI**, then Control Room, then Retro view.
+5. **Server + SQLite + seed** and the API from §5, tested with the Thriveni seed. *(done)*
+5b. **First round of testing feedback** (§8): holidays, plan edits as recorded history, client-date variance, both attribution strategies, unconfirmed-work warnings, the shared extinguisher, events refused on unlocked modules, and a fix to late actuals. *(done: 312 engine and 120 server tests, plus a manual run of every scenario against the real server)*
+6. **UI**: the Multiverse timeline first, then the Control Room, then the Retro view. Standard events (delay, finished, capacity, holiday, block, plan edit, void) as buttons with example text. The Control Room shows both variances; the Retro shows both attribution strategies. Needs engine pieces not built yet: progress %, the current bottleneck and the retro summary.

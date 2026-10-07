@@ -42,9 +42,9 @@ describe('sequential attribution (v1)', () => {
     expect(result.strategy).toBe('sequential');
     expect(result.totalVariance).toBe(3);
     expect(result.contributions).toEqual([
-      { eventId: 'late-dev', days: 0, effortDays: 3, category: UNEXPLAINED },
-      { eventId: 'blocked', days: 1, effortDays: 1, category: 'Dependency delays' },
-      { eventId: 'ext', days: 2, effortDays: 14, category: 'Late scope discovery' },
+      { eventId: 'late-dev', kind: 'EVENT', days: 0, effortDays: 3, category: UNEXPLAINED },
+      { eventId: 'blocked', kind: 'EVENT', days: 1, effortDays: 1, category: 'Dependency delays' },
+      { eventId: 'ext', kind: 'EVENT', days: 2, effortDays: 14, category: 'Late scope discovery' },
     ]);
     expect(result.contributions.reduce((sum, c) => sum + c.days, 0)).toBe(result.totalVariance);
     expect(result.interaction).toBe(0);

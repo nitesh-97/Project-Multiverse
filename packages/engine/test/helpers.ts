@@ -1,4 +1,4 @@
-import type { CapacityPoint, Effect, Event, EventType, Plan, TaskProgress } from '../src';
+import type { CapacityPoint, Effect, Event, EventType, Plan, PlanEdit, PlanEditEffect, TaskProgress } from '../src';
 
 /** An event with sensible defaults. `asOf` doubles as occurredAt. */
 export function makeEvent(
@@ -23,6 +23,25 @@ export function makeEvent(
 }
 
 export const adjust = (taskId: string, delta: number): Effect => ({ op: 'ADJUST_ESTIMATE', taskId, delta });
+
+/** A planning change (refining a module that has not started). */
+export function makePlanEdit(id: string, asOf: string, effects: PlanEditEffect[], extra: Partial<PlanEdit> = {}): PlanEdit {
+  return { id, title: id, createdBy: 'planner', asOf, effects, ...extra };
+}
+
+export const holiday = (date: string): Effect => ({ op: 'ADD_HOLIDAY', date });
+
+/** The extinguisher as the team experienced it: ONE shared 2-day effort, between client changes and integration. */
+export function sharedExtinguisherEffects(): Effect[] {
+  return [
+    {
+      op: 'ADD_TASK',
+      task: { id: 'proj.ext', moduleId: 'project', teamId: 'dev', kind: 'TASK', name: 'Extinguisher system', estimate: 2, featureId: 'extinguisher' },
+      dependsOn: ['proj.chg.dev'],
+      blocks: ['proj.integration'],
+    },
+  ];
+}
 
 /** The late-extinguisher event: every Thriveni module gets a 2-day integration task between its Dev and Alpha. */
 export function extinguisherEffects(): Effect[] {

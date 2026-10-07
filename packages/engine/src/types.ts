@@ -52,6 +52,11 @@ export interface TaskProgress {
   remaining?: WorkDays;
   finishedOn?: ISODate;
   finishedAt?: number;
+  /**
+   * Set by the engine when carrying a forecast forward put the task in this state without anyone recording it.
+   * Recording progress for the task clears it. A finished task that is still `assumed` is an unconfirmed completion.
+   */
+  assumed?: boolean;
 }
 
 export interface Task {
